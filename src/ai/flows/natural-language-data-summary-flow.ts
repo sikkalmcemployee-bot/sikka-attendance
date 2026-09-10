@@ -14,7 +14,6 @@ import { z } from 'genkit';
 const NaturalLanguageDataSummaryInputSchema = z.object({
   query: z.string().describe('The natural language query or request for data summary.'),
   attendanceData: z.string().optional().describe('A string representation of relevant attendance data, if available. For example: "Employee S001 marked IN at 09:00, OUT at 17:00 on 2024-07-20. Employee S002 was absent on 2024-07-20."'),
-  payrollData: z.string().optional().describe('A string representation of relevant payroll data, if available. For example: "Employee S001 net salary for July was 50000 INR, PF contribution 6000 INR."'),
 });
 export type NaturalLanguageDataSummaryInput = z.infer<typeof NaturalLanguageDataSummaryInputSchema>;
 
@@ -52,12 +51,11 @@ const naturalLanguageDataSummaryPrompt = ai.definePrompt({
     ],
   },
   prompt: `You are an intelligent HR assistant and data analyst for Sikka Industries & Logistics.
-Your task is to provide concise and insightful summaries or answer questions based on the provided attendance and payroll data.
+Your task is to provide concise and insightful summaries or answer questions based on the provided attendance data.
 Analyze the data to identify key trends, answer specific questions, or generate ad-hoc reports as requested by the HR manager.
 If data is not provided or insufficient to answer the query, state that.
 
 Attendance Data: {{{attendanceData}}}
-Payroll Data: {{{payrollData}}}
 
 HR Manager's Query: """{{{query}}}"""
 

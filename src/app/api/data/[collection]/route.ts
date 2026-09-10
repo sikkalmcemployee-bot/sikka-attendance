@@ -91,8 +91,7 @@ export async function GET(
     const db = await getDb();
     
     if (collection === 'notifications') {
-      const data = await db.collection(collection).find({}).sort({ createdAt: -1, timestamp: -1, _id: -1 }).limit(100).toArray();
-      return NextResponse.json(data);
+      return NextResponse.json([]);
     }
 
     if (collection === 'attendance') {
@@ -169,8 +168,6 @@ export async function POST(
       realtimeBroadcaster.broadcast('attendance_updated', { collection, action: 'INSERT', data: body });
     } else if (collection === 'leaveRequests') {
       realtimeBroadcaster.broadcast('leave_updated', { collection, action: 'INSERT', data: body });
-    } else if (collection === 'notifications') {
-      realtimeBroadcaster.broadcast('notification_created', { collection, action: 'INSERT', data: body });
     } else {
       realtimeBroadcaster.broadcast('data_mutation', { collection, action: 'INSERT', data: body });
     }
@@ -230,8 +227,6 @@ export async function PUT(
       realtimeBroadcaster.broadcast('attendance_updated', { collection, action: 'UPDATE', data: updateData });
     } else if (collection === 'leaveRequests') {
       realtimeBroadcaster.broadcast('leave_updated', { collection, action: 'UPDATE', data: updateData });
-    } else if (collection === 'notifications') {
-      realtimeBroadcaster.broadcast('notification_created', { collection, action: 'UPDATE', data: updateData });
     } else {
       realtimeBroadcaster.broadcast('data_mutation', { collection, action: 'UPDATE', data: updateData });
     }

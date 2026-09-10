@@ -8,9 +8,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertCircle, Loader2, Eye, EyeOff } from "lucide-react";
 import Image from "next/image";
 import Cookies from 'js-cookie';
-import { getDeviceId, getDeviceName } from "@/lib/utils";
 import { registerNativeUser } from "@/lib/android-bridge";
-import { requestAndEnableNotifications } from "@/lib/notification-client";
 
 export default function LoginPage() {
   const [username, setUsername] = useState("");
@@ -61,7 +59,6 @@ export default function LoginPage() {
     }
     const empId = userData?.employeeId || userData?.username || userData?.id || '';
     registerNativeUser(empId, userData?.role || 'EMPLOYEE', userData?.fullName || '');
-    requestAndEnableNotifications(userData).catch(() => {});
   };
 
   const handleLogin = async (e: React.FormEvent) => {

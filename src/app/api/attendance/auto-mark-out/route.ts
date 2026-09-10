@@ -31,7 +31,6 @@ async function processAutoMarkOut() {
 
     const attendanceCol = db.collection('attendance');
     const plantExitsCol = db.collection('plantExits');
-    const notificationsCol = db.collection('notifications');
 
     // Find all active Open attendance records
     const openRecords = await attendanceCol.find({ status: 'Open' }).toArray();
@@ -125,17 +124,6 @@ async function processAutoMarkOut() {
           action: 'auto_out',
           data: { ...record, ...updatePayload, id: String(record._id) },
         });
-
-        // Record notification in MongoDB
-        const notifMsg = `${record.employeeName || 'Employee'} – AUTO OUT Processed (Session ${sessionIdx}) | Recorded: ${creditedHours} hrs worked.`;
-        await notificationsCol.insertOne({
-          employeeId: record.employeeId,
-          message: notifMsg,
-          timestamp: format(now, "yyyy-MM-dd HH:mm:ss"),
-          read: false,
-          type: 'AUTO_OUT',
-          createdAt: now.toISOString(),
-        }).catch(() => {});
 
         processedRecords.push({
           id: String(record._id),

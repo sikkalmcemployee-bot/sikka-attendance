@@ -2,17 +2,7 @@ let isSchedulerRunning = false;
 let historicalAuditDone = false;
 
 /**
- * IST-aware Background Scheduler for Server-side Automatic Shift Reminders.
- *
- * Triggers the shift-reminders evaluation at the 4 key attendance times:
- *   - 06:00 AM IST  → Night shift Mark OUT reminder
- *   - 10:00 AM IST  → Day shift Mark IN reminder
- *   - 06:00 PM IST  → Day shift Mark OUT reminder
- *   - 08:00 PM IST  → Night shift Mark IN reminder
- *
- * Smart window: Only evaluates within ±10 minutes of each target time.
- * Polling every 60 seconds ensures at most 1 evaluation per window per day.
- * Uses MongoDB deduplication so no duplicate notifications are ever sent.
+ * IST-aware Background Scheduler for Server-side Automatic Mark OUT processing.
  */
 
 

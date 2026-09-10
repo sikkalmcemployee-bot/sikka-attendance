@@ -2,7 +2,6 @@ type RealtimeEventType =
   | 'attendance_updated'
   | 'leave_updated'
   | 'facility_exit_updated'
-  | 'notification_created'
   | 'device_registered'
   | 'data_mutation';
 

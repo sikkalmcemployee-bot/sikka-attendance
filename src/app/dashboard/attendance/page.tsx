@@ -74,7 +74,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { postNativeNotification } from "@/lib/android-bridge";
 import { getTranslation } from "@/lib/translations";
 
 const getISTTime = () => {
@@ -411,58 +410,73 @@ export default function AttendancePage() {
 
     setLocationPermissionStatus("checking");
 
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude: lat, longitude: lng, accuracy } = pos.coords;
-        setLocationPermissionStatus("granted");
-        setLocationPermissionMessage(null);
-        setCurrentGPS({ lat, lng });
-        setGpsAccuracy(accuracy);
+    const handlePosSuccess = (pos: GeolocationPosition) => {
+      const { latitude: lat, longitude: lng, accuracy } = pos.coords;
+      setLocationPermissionStatus("granted");
+      setLocationPermissionMessage(null);
+      setCurrentGPS({ lat, lng });
+      setGpsAccuracy(accuracy);
 
-        const sortedAllPlants = (plants || [])
-          .map((p) => ({ plant: p, distance: Math.round(getPreciseDistance(lat, lng, p.lat, p.lng)) }))
-          .sort((a, b) => a.distance - b.distance);
+      const sortedAllPlants = (plants || [])
+        .map((p) => ({ plant: p, distance: Math.round(getPreciseDistance(lat, lng, p.lat, p.lng)) }))
+        .sort((a, b) => a.distance - b.distance);
 
-        if (sortedAllPlants.length > 0) {
-          setNearestPlantInfo(sortedAllPlants[0]);
-          if (sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)) {
-            setDetectedPlant(sortedAllPlants[0].plant);
-          } else {
-            setDetectedPlant(null);
-          }
+      if (sortedAllPlants.length > 0) {
+        setNearestPlantInfo(sortedAllPlants[0]);
+        if (sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)) {
+          setDetectedPlant(sortedAllPlants[0].plant);
+          // Instant address assignment: plant name + location (0ms, no network wait)
+          setDetectedAddress((prev) => prev || (sortedAllPlants[0].plant.name + (sortedAllPlants[0].plant.location ? ` (${sortedAllPlants[0].plant.location})` : "")));
         } else {
-          setNearestPlantInfo(null);
           setDetectedPlant(null);
         }
+      } else {
+        setNearestPlantInfo(null);
+        setDetectedPlant(null);
+      }
 
-        // Fast background reverse geocoding
-        fetch('/api/geocode/reverse', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lat, lng })
-        }).then(res => res.ok ? res.json() : null)
-          .then(data => {
-            if (data?.address) {
-              const addr = typeof data.address === 'object' ? (data.address.Match_addr || data.address.LongLabel || data.address.Address || "") : data.address;
-              setDetectedAddress(addr);
-            }
-            if (data?.components) {
-              setDetailedLocation({
-                street: data.components.street || '',
-                area: data.components.area || '',
-                city: data.components.city || '',
-                state: data.components.state || '',
-                pincode: data.components.pincode || ''
-              });
-            }
-          }).catch(() => { });
-      },
+      // Fast background reverse geocoding (non-blocking)
+      fetch('/api/geocode/reverse', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat, lng })
+      }).then(res => res.ok ? res.json() : null)
+        .then(data => {
+          if (data?.address) {
+            const addr = typeof data.address === 'object' ? (data.address.Match_addr || data.address.LongLabel || data.address.Address || "") : data.address;
+            if (addr) setDetectedAddress(addr);
+          }
+          if (data?.components) {
+            setDetailedLocation({
+              street: data.components.street || '',
+              area: data.components.area || '',
+              city: data.components.city || '',
+              state: data.components.state || '',
+              pincode: data.components.pincode || ''
+            });
+          }
+        }).catch(() => { });
+    };
+
+    navigator.geolocation.getCurrentPosition(
+      handlePosSuccess,
       (err) => {
         setLocationPermissionStatus("denied");
         setLocationPermissionMessage(t.locationPermissionRequired);
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
     );
+
+    // Warm background listener to keep GPS hot while user is on page
+    if (watchIdRef.current === null) {
+      try {
+        watchIdRef.current = navigator.geolocation.watchPosition(
+          handlePosSuccess,
+          () => {},
+          { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
+        );
+      } catch (e) {}
+    }
   }, [plants, t]);
 
   useEffect(() => {
@@ -484,18 +498,16 @@ export default function AttendancePage() {
     return () => clearInterval(timer);
   }, []);
 
-  // Deep-link handler: open Mark IN or Mark OUT dialog from notification tap
-  // The notification payload sets deepLink = '/dashboard/attendance?action=mark_in'
+  // Query-param handler: open Mark IN or Mark OUT dialog if action parameter is present
   const searchParams = useSearchParams();
   useEffect(() => {
     if (!isMounted || !isEmployeeLogin) return;
     const action = searchParams?.get("action");
     if (action === "mark_in") {
-      // Small delay to allow location check to start first
-      const t = setTimeout(() => setActiveDialog("IN"), 800);
+      const t = setTimeout(() => setActiveDialog("IN"), 100);
       return () => clearTimeout(t);
     } else if (action === "mark_out") {
-      const t = setTimeout(() => setActiveDialog("OUT"), 800);
+      const t = setTimeout(() => setActiveDialog("OUT"), 100);
       return () => clearTimeout(t);
     }
   }, [isMounted, isEmployeeLogin, searchParams]);
@@ -1168,7 +1180,7 @@ export default function AttendancePage() {
             await refreshData();
           }
         },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
       );
     };
 
@@ -1235,26 +1247,6 @@ export default function AttendancePage() {
         setActiveDialog("NONE");
         toast({ title: `Mark IN Successful (Session ${nextSessionIndex} of 2)`, description: detectedPlant ? `Welcome back to ${plantName}` : `Logged as ${attendanceType}` });
         await refreshData();
-
-        const notifMsg = `${effectiveEmployeeName} – Mark IN Recorded (Session ${nextSessionIndex}) | Time: ${timeStr} | ${detectedPlant ? plantName : attendanceType}`;
-        postNativeNotification(
-          "Mark IN Successful",
-          notifMsg,
-          "MARK_IN",
-          effectiveEmployeeId,
-          "EMPLOYEE"
-        );
-        fetch('/api/notifications/send-push', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: "Mark IN Successful",
-            message: notifMsg,
-            type: 'MARK_IN',
-            employeeId: effectiveEmployeeId,
-            targetRole: 'EMPLOYEE'
-          })
-        }).catch((err) => console.warn("Push notification deferred:", err));
       } else {
         // Always treat non-OK as a hard failure — never fall through to a local-only record.
         // MongoDB has not confirmed the save, so we must not show a success state.
@@ -1285,9 +1277,9 @@ export default function AttendancePage() {
       });
       return;
     }
-    if (isCooldownLocked || isLoadingLocation || isMutatingAttendance || !!activeRecord) return;
+    if (isCooldownLocked || isMutatingAttendance || !!activeRecord) return;
 
-    clearActiveWatch();
+    setActiveDialog("IN");
     requestLocation("IN");
   };
 
@@ -1391,26 +1383,6 @@ export default function AttendancePage() {
         setActiveDialog("NONE");
         toast({ title: `Mark OUT Successful (Session ${sessionIdx})`, description: `Shift completed. Hours: ${formatHoursToHHMM(finalHours)}` });
         await refreshData();
-
-        const notifMsg = `${effectiveEmployeeName} – Mark OUT Recorded (Session ${sessionIdx}) | Time: ${format(outDT, "HH:mm")} | Worked: ${formatHoursToHHMM(finalHours)}`;
-        postNativeNotification(
-          "Mark OUT Successful",
-          notifMsg,
-          "MARK_OUT",
-          effectiveEmployeeId,
-          "EMPLOYEE"
-        );
-        fetch('/api/notifications/send-push', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            title: "Mark OUT Successful",
-            message: notifMsg,
-            type: 'MARK_OUT',
-            employeeId: effectiveEmployeeId,
-            targetRole: 'EMPLOYEE'
-          })
-        }).catch((err) => console.warn("Push notification deferred:", err));
       } else {
         // Always treat non-OK as a hard failure — never fall through to a local-only update.
         // MongoDB has not confirmed the save, so we must not show a success state.
@@ -1434,9 +1406,9 @@ export default function AttendancePage() {
   const handleMarkOutClick = (e?: React.MouseEvent | React.FormEvent) => {
     e?.preventDefault?.();
     e?.stopPropagation?.();
-    if (!activeRecord || !canMarkOut || isLoadingLocation || isMutatingAttendance) return;
+    if (!activeRecord || !canMarkOut || isMutatingAttendance) return;
 
-    clearActiveWatch();
+    setActiveDialog("OUT");
     requestLocation("OUT");
   };
 
@@ -1510,92 +1482,98 @@ export default function AttendancePage() {
 
     if (isMutatingAttendance) return;
 
-    clearActiveWatch();
-    setIsLoadingLocation(true);
-    setDetectedPlant(null);
-    setDetectedAddress("");
+    if (type !== "OUT_AUTO") {
+      setActiveDialog(type);
+    }
+
+    // Only set loading if no coordinates exist at all
+    if (!currentGPS) {
+      setIsLoadingLocation(true);
+    }
 
     if (type === "OUT_AUTO") {
       isAutoTriggering.current = true;
     }
 
-    const processGeocoding = async (lat: number, lng: number, accuracy: number) => {
+    const processGeocoding = (lat: number, lng: number, accuracy: number) => {
       try {
         setGpsAccuracy(accuracy);
         setLocationPermissionStatus("granted");
         setLocationPermissionMessage(null);
+        setCurrentGPS({ lat, lng });
 
-        if (accuracy > 100) {
-          toast({
-            variant: "default",
-            title: "GPS Accuracy Notice",
-            description: `Current GPS accuracy is ±${accuracy.toFixed(1)}m. Proceeding with best available signal.`,
-          });
+        // Immediate plant distance computation (0ms)
+        const sortedAllPlants = (plants || [])
+          .map(p => ({ plant: p, distance: Math.round(getPreciseDistance(lat, lng, p.lat, p.lng)) }))
+          .sort((a, b) => a.distance - b.distance);
+
+        let defaultPlantAddr = "";
+        if (sortedAllPlants.length > 0) {
+          setNearestPlantInfo(sortedAllPlants[0]);
+          if (sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)) {
+            setDetectedPlant(sortedAllPlants[0].plant);
+            defaultPlantAddr = sortedAllPlants[0].plant.name + (sortedAllPlants[0].plant.location ? ` (${sortedAllPlants[0].plant.location})` : "");
+            // Instantly fill detectedAddress so confirmation button is immediately active!
+            setDetectedAddress((prev) => prev || defaultPlantAddr);
+          } else {
+            setDetectedPlant(null);
+          }
+        } else {
+          setNearestPlantInfo(null);
+          setDetectedPlant(null);
         }
 
-        const response = await fetch('/api/geocode/reverse', {
+        if (type !== "OUT_AUTO") {
+          setIsLoadingLocation(false);
+        }
+
+        // Fast background reverse geocoding to enrich address details
+        fetch('/api/geocode/reverse', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ lat, lng })
-        });
-
-        const data = await response.json();
-        let components = { street: "", area: "", city: "", state: "", pincode: "" };
-
-        if (response.ok) {
-          let geocodedAddress = "";
-          if (data?.address) {
-            if (typeof data.address === 'object') {
-              geocodedAddress = data.address.Match_addr || data.address.LongLabel || data.address.Address || "";
-            } else if (typeof data.address === 'string') {
-              geocodedAddress = data.address;
+        }).then(res => res.ok ? res.json() : null)
+          .then(data => {
+            if (data?.address) {
+              const geocodedAddress = typeof data.address === 'object'
+                ? (data.address.Match_addr || data.address.LongLabel || data.address.Address || "")
+                : data.address;
+              if (geocodedAddress) {
+                setDetectedAddress(geocodedAddress);
+              }
             }
-          }
-
-          const raw = data?.components;
-          components = {
-            street: typeof raw?.street === 'string' ? raw.street : '',
-            area: typeof raw?.area === 'string' ? raw.area : '',
-            city: typeof raw?.city === 'string' ? raw.city : '',
-            state: typeof raw?.state === 'string' ? raw.state : '',
-            pincode: typeof raw?.pincode === 'string' ? raw.pincode : '',
-          };
-
-          setDetectedAddress(geocodedAddress);
-          setDetailedLocation(components);
-          setCurrentGPS({ lat, lng });
-
-          const sortedAllPlants = (plants || [])
-            .map(p => ({ plant: p, distance: Math.round(getPreciseDistance(lat, lng, p.lat, p.lng)) }))
-            .sort((a, b) => a.distance - b.distance);
-
-          if (sortedAllPlants.length > 0) {
-            setNearestPlantInfo(sortedAllPlants[0]);
-            if (sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)) {
-              setDetectedPlant(sortedAllPlants[0].plant);
-            } else {
-              setDetectedPlant(null);
+            if (data?.components) {
+              setDetailedLocation({
+                street: typeof data.components?.street === 'string' ? data.components.street : '',
+                area: typeof data.components?.area === 'string' ? data.components.area : '',
+                city: typeof data.components?.city === 'string' ? data.components.city : '',
+                state: typeof data.components?.state === 'string' ? data.components.state : '',
+                pincode: typeof data.components?.pincode === 'string' ? data.components.pincode : '',
+              });
             }
-          } else {
-            setNearestPlantInfo(null);
-            setDetectedPlant(null);
-          }
 
-          if (type === "OUT_AUTO" && isAutoTriggering.current) {
-            isAutoTriggering.current = false;
-            const autoPlant = sortedAllPlants.length > 0 && sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)
-              ? sortedAllPlants[0].plant
-              : null;
-            performAutoCheckOut(lat, lng, geocodedAddress, components, autoPlant);
-          }
-        } else {
-          console.warn('Reverse geocode failed', data);
-        }
+            if (type === "OUT_AUTO" && isAutoTriggering.current) {
+              isAutoTriggering.current = false;
+              const autoPlant = sortedAllPlants.length > 0 && sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)
+                ? sortedAllPlants[0].plant
+                : null;
+              performAutoCheckOut(lat, lng, data?.address || defaultPlantAddr, data?.components || {}, autoPlant);
+            }
+          }).catch((error) => {
+            console.warn("Reverse geocode background error:", error);
+            if (type === "OUT_AUTO" && isAutoTriggering.current) {
+              isAutoTriggering.current = false;
+              const autoPlant = sortedAllPlants.length > 0 && sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)
+                ? sortedAllPlants[0].plant
+                : null;
+              performAutoCheckOut(lat, lng, defaultPlantAddr || "Plant Area", {}, autoPlant);
+            }
+          });
+
       } catch (error) {
         console.error("Fast geocoding failed", error);
       } finally {
         if (type !== "OUT_AUTO") {
-          setActiveDialog(type);
           setIsLoadingLocation(false);
         }
       }
@@ -1610,13 +1588,14 @@ export default function AttendancePage() {
 
     const emergencyTimeout = setTimeout(() => {
       setIsLoadingLocation(false);
-      clearActiveWatch();
-      toast({
-        variant: "destructive",
-        title: "GPS Tracking Timeout",
-        description: "System could not identify device coordinates in time. Please retry."
-      });
-    }, 6000);
+      if (!currentGPS) {
+        toast({
+          variant: "destructive",
+          title: "GPS Tracking Timeout",
+          description: "System could not identify device coordinates in time. Please retry."
+        });
+      }
+    }, 5000);
 
     navigator.geolocation.getCurrentPosition(
       (pos) => {
@@ -1626,11 +1605,12 @@ export default function AttendancePage() {
       (err: GeolocationPositionError) => {
         clearTimeout(emergencyTimeout);
         setIsLoadingLocation(false);
-        clearActiveWatch();
-        setLocationPermissionStatus("denied");
-        setLocationPermissionMessage("Please allow location access to mark attendance.");
+        if (!currentGPS) {
+          setLocationPermissionStatus("denied");
+          setLocationPermissionMessage("Please allow location access to mark attendance.");
+        }
       },
-      { enableHighAccuracy: true, timeout: 5000, maximumAge: 10000 }
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
     );
   };
 
@@ -1988,8 +1968,8 @@ export default function AttendancePage() {
           const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
             navigator.geolocation.getCurrentPosition(resolve, reject, {
               enableHighAccuracy: true,
-              timeout: 6000,
-              maximumAge: 0,
+              timeout: 5000,
+              maximumAge: 30000,
             });
           });
           clientLat = pos.coords.latitude;

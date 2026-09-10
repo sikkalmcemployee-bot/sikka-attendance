@@ -24,7 +24,6 @@ import {
   Settings, 
   LogOut, 
   Factory, 
-  CreditCard, 
   BarChart3, 
   Clock, 
   User as UserIcon, 
@@ -32,9 +31,6 @@ import {
   ShieldAlert, 
   ArrowLeft, 
   Smartphone,
-  Bell,
-  CheckCheck,
-  Trash2,
   Globe
 } from "lucide-react";
 import {
@@ -58,13 +54,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-} from "@/components/ui/popover";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Badge } from "@/components/ui/badge";
-import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -79,368 +68,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
 import Cookies from 'js-cookie';
 import { format } from "date-fns";
-import { registerNativeUser, updateNativeBadgeCount, logoutNativeUser, setAppBadge, clearAppBadge, requestAppNotificationPermission, postNativeNotification } from "@/lib/android-bridge";
-import { playNotificationSoundAndVibrate } from "@/lib/notification-sound";
-import { NotificationBanner, NotificationStatusControl } from "@/components/notification-banner";
-
-function NotificationBell() {
-  const { notifications = [], employees = [], updateRecord, deleteRecord, clearAllNotifications, refreshData, verifiedUser } = useData();
-  const router = useRouter();
-  const [isOpen, setIsOpen] = useState(false);
-
-  const userRoleUpper = String(verifiedUser?.role || '').toUpperCase();
-  const isEmployee = userRoleUpper === 'EMPLOYEE' ||
-    (Array.isArray(verifiedUser?.role) && verifiedUser.role.map((r: any) => String(r).toUpperCase()).includes('EMPLOYEE')) ||
-    (!!verifiedUser?.employeeId && !['SUPER_ADMIN', 'ADMIN', 'HR', 'USER'].includes(userRoleUpper));
-
-  // Gather all unique identifiers for the currently logged-in user
-  const userIdentifiers = useMemo(() => {
-    if (!verifiedUser) return [];
-    const ids: string[] = [
-      verifiedUser.employeeId,
-      verifiedUser.username,
-      verifiedUser.id,
-      (verifiedUser as any)._id,
-      (verifiedUser as any).aadhaar,
-      (verifiedUser as any).aadhaarNumber,
-      verifiedUser.mobile,
-      (verifiedUser as any).mobileNumber
-    ].filter(Boolean).map(id => String(id).trim().toUpperCase());
-
-    const loginIdent = String(verifiedUser.username || verifiedUser.employeeId || '').replace(/\s/g, '').toUpperCase();
-    const matchedEmp = (employees || []).find(e => {
-      const empAadhaar = String((e as any).aadhaarNumber || e.aadhaar || '').replace(/\s/g, '').toUpperCase();
-      const empMobile = String((e as any).mobileNumber || e.mobile || '').replace(/\s/g, '').toUpperCase();
-      const empId = String(e.employeeId || e.id || '').replace(/\s/g, '').toUpperCase();
-      return (
-        (empAadhaar && empAadhaar === loginIdent) ||
-        (empMobile && empMobile === loginIdent) ||
-        (empId && empId === loginIdent) ||
-        (empId && ids.includes(empId))
-      );
-    });
-
-    if (matchedEmp) {
-      if (matchedEmp.employeeId) ids.push(String(matchedEmp.employeeId).trim().toUpperCase());
-      if (matchedEmp.id) ids.push(String(matchedEmp.id).trim().toUpperCase());
-      if ((matchedEmp as any)._id) ids.push(String((matchedEmp as any)._id).trim().toUpperCase());
-      if (matchedEmp.aadhaar) ids.push(String(matchedEmp.aadhaar).trim().toUpperCase());
-      if (matchedEmp.mobile) ids.push(String(matchedEmp.mobile).trim().toUpperCase());
-    }
-
-    return Array.from(new Set(ids));
-  }, [verifiedUser, employees]);
-
-  // Strict employee filtering:
-  // - Employees see their own notifications + global announcements
-  // - Admin / HR / Super Admin see system/admin notifications, but NEVER see employee Mark IN / Mark OUT notifications
-  const userNotifications = useMemo(() => {
-    return (notifications || []).filter((n: any) => {
-      if (!n) return false;
-      const targetEmpId = String(n.employeeId || '').trim().toUpperCase();
-      const targetEmpName = String(n.employeeName || '').trim().toUpperCase();
-      const userFullName = String(verifiedUser?.fullName || (verifiedUser as any)?.name || '').trim().toUpperCase();
-      const notifType = String(n.type || n.notificationType || n.notification_type || '').toUpperCase();
-      const isReminder = [
-        'SHIFT_REMINDER',
-        'DAY_IN_REMINDER',
-        'DAY_OUT_REMINDER',
-        'NIGHT_IN_REMINDER',
-        'NIGHT_OUT_REMINDER',
-        'DAY_MARK_IN_REMINDER',
-        'DAY_MARK_OUT_REMINDER',
-        'NIGHT_MARK_IN_REMINDER',
-        'NIGHT_MARK_OUT_REMINDER',
-        'REMINDER'
-      ].includes(notifType) || Boolean(n.reminderType);
-
-      // Completely exclude reminder notifications (attendance reminders are disabled)
-      if (isReminder) {
-        return false;
-      }
-
-      const isEmployeeOnlyNotif = [
-        'MARK_IN',
-        'MARK_OUT',
-        'AUTO_OUT'
-      ].includes(notifType);
-
-      if (isEmployee) {
-        // If notification has a specific employeeId, it MUST match one of this employee's identifiers or name
-        if (targetEmpId && targetEmpId !== "GLOBAL" && targetEmpId !== "ALL" && targetEmpId !== "N/A") {
-          const isIdMatch = userIdentifiers.includes(targetEmpId);
-          const isNameMatch = Boolean(targetEmpName && userFullName && (targetEmpName === userFullName || userFullName.includes(targetEmpName)));
-          return isIdMatch || isNameMatch;
-        }
-        // General/broadcast notification
-        return true;
-      } else {
-        // For Admin / HR / Super Admin:
-        // Strictly exclude employee Mark IN / Mark OUT / Auto OUT
-        if (isEmployeeOnlyNotif) {
-          return false;
-        }
-
-        // For other system notifications: show if targeted to admin or global
-        if (targetEmpId && targetEmpId !== "GLOBAL" && targetEmpId !== "ALL" && targetEmpId !== "N/A") {
-          return userIdentifiers.includes(targetEmpId) || ['SUPER_ADMIN', 'ADMIN'].includes(String(verifiedUser?.role || '').toUpperCase());
-        }
-        return true;
-      }
-    }).sort((a: any, b: any) => {
-      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      if (timeA && timeB && timeA !== timeB) return timeB - timeA;
-      return (b.timestamp || "").localeCompare(a.timestamp || "");
-    });
-  }, [notifications, userIdentifiers, isEmployee, verifiedUser?.role, verifiedUser?.fullName]);
-
-  // Red badge reflects UNREAD notifications only
-  const unreadCount = useMemo(() => {
-    return userNotifications.filter((n: any) => n.read !== true && n.isRead !== true).length;
-  }, [userNotifications]);
-
-  // Sync with native Android badge count and Web PWA badge
-  useEffect(() => {
-    setAppBadge(unreadCount);
-  }, [unreadCount]);
-
-  // Format count: 1 to 9 as exact number, 10 or more as "9+"
-  const badgeLabel = unreadCount > 9 ? "9+" : String(unreadCount);
-
-  const handleNotificationClick = async (notif: any) => {
-    const notifId = notif.id || notif._id;
-    const isUnread = notif.read !== true && notif.isRead !== true;
-    if (isUnread && notifId) {
-      const nowIso = new Date().toISOString();
-      await updateRecord('notifications', notifId, { read: true, isRead: true, readAt: nowIso }, true);
-      fetch('/api/notifications/read', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ notificationId: notifId }),
-      }).catch(() => {});
-    }
-    setIsOpen(false);
-    
-    // Contextual routing based on notification payload
-    if (notif.type === 'SALARY_PAID' || notif.message?.toLowerCase().includes('salary')) {
-      router.push('/dashboard/payroll');
-    } else if (notif.type === 'LEAVE_APPROVAL' || notif.message?.toLowerCase().includes('leave')) {
-      router.push('/dashboard/approvals');
-    } else {
-      router.push('/dashboard/attendance');
-    }
-  };
-
-  const handleMarkSingleAsRead = async (e: React.MouseEvent, notif: any) => {
-    e.stopPropagation();
-    const notifId = notif.id || notif._id;
-    const isUnread = notif.read !== true && notif.isRead !== true;
-    if (isUnread && notifId) {
-      const nowIso = new Date().toISOString();
-      await updateRecord('notifications', notifId, { read: true, isRead: true, readAt: nowIso }, true);
-      fetch('/api/notifications/read', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ notificationId: notifId }),
-      }).catch(() => {});
-    }
-  };
-
-  const handleMarkAllAsRead = async () => {
-    const unread = userNotifications.filter((n: any) => n.read !== true && n.isRead !== true);
-    const nowIso = new Date().toISOString();
-    
-    // Instant optimistic UI update
-    unread.forEach((notif: any) => {
-      const notifId = notif.id || notif._id;
-      if (notifId) {
-        updateRecord('notifications', notifId, { read: true, isRead: true, readAt: nowIso }, true);
-      }
-    });
-
-    const empId = verifiedUser?.employeeId || verifiedUser?.username || verifiedUser?.id;
-    if (empId) {
-      fetch('/api/notifications/read', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ employeeId: empId, markAll: true }),
-      }).catch(() => {});
-    }
-  };
-
-  const handleDeleteSingle = async (e: React.MouseEvent, notif: any) => {
-    e.stopPropagation();
-    const notifId = notif.id || notif._id;
-    if (notifId) {
-      await deleteRecord('notifications', notifId, true);
-    }
-  };
-
-  const handleClearAll = async () => {
-    const empId = verifiedUser?.employeeId || verifiedUser?.username || verifiedUser?.id;
-    const isGlobal = !isEmployee;
-    await clearAllNotifications(empId, isGlobal);
-  };
-
-  return (
-    <Popover open={isOpen} onOpenChange={setIsOpen}>
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label={`Notifications ${unreadCount > 0 ? `(${unreadCount} unread)` : ''}`}
-          className="relative p-2 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-slate-100 active:scale-95 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
-        >
-          <Bell className="w-5 h-5 text-slate-700 hover:text-slate-900 transition-colors" />
-          
-          {/* Small Red Circular Badge with White Bold Unread Count */}
-          {unreadCount > 0 && (
-            <span
-              className={cn(
-                "absolute -top-0.5 -right-0.5 flex items-center justify-center",
-                "bg-red-600 text-white font-bold leading-none select-none",
-                "rounded-full ring-2 ring-white shadow-sm pointer-events-none",
-                "transition-all duration-200 transform animate-in zoom-in-75",
-                unreadCount > 9
-                  ? "h-[18px] min-w-[20px] px-1 text-[9px]"
-                  : "h-[18px] w-[18px] text-[10px]"
-              )}
-              title={`${unreadCount} unread notification${unreadCount === 1 ? '' : 's'}`}
-            >
-              {badgeLabel}
-            </span>
-          )}
-        </button>
-      </PopoverTrigger>
-      
-      <PopoverContent align="end" className="w-80 sm:w-96 p-0 rounded-2xl shadow-2xl border-slate-200 bg-white overflow-hidden z-50">
-        <div className="flex items-center justify-between p-4 border-b border-slate-100 bg-slate-50/80 backdrop-blur-sm">
-          <div className="flex items-center gap-2">
-            <div className="p-1.5 rounded-lg bg-primary/10 text-primary">
-              <Bell className="w-4 h-4" />
-            </div>
-            <div>
-              <span className="font-bold text-sm text-slate-800">Notifications</span>
-              {unreadCount > 0 && (
-                <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-red-50 text-red-600 border border-red-100">
-                  {unreadCount} unread
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5">
-            {unreadCount > 0 && (
-              <button
-                type="button"
-                onClick={handleMarkAllAsRead}
-                title="Mark all as read"
-                className="text-[11px] font-bold text-primary hover:text-primary/80 transition-colors flex items-center gap-1 bg-primary/5 hover:bg-primary/10 px-2 py-1 rounded-lg"
-              >
-                <CheckCheck className="w-3.5 h-3.5" /> Read all
-              </button>
-            )}
-            {userNotifications.length > 0 && (
-              <button
-                type="button"
-                onClick={handleClearAll}
-                title="Clear all notifications"
-                className="text-[11px] font-bold text-slate-500 hover:text-rose-600 transition-colors flex items-center gap-1 bg-slate-100 hover:bg-rose-50 px-2 py-1 rounded-lg"
-              >
-                <Trash2 className="w-3 h-3 text-rose-500" /> Clear all
-              </button>
-            )}
-          </div>
-        </div>
-
-        <ScrollArea className="max-h-[380px]">
-          {userNotifications.length === 0 ? (
-            <div className="py-12 text-center text-slate-400">
-              <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center mx-auto mb-2.5">
-                <Bell className="w-6 h-6 text-slate-300" />
-              </div>
-              <p className="text-xs font-bold text-slate-600">No notifications yet</p>
-              <p className="text-[11px] text-slate-400 mt-0.5">We'll alert you when there are updates.</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-slate-100">
-              {userNotifications.map((notif: any) => {
-                const notifId = notif.id || notif._id || notif.dedupeKey;
-                const isUnread = !notif.read;
-                return (
-                  <div
-                    key={notifId || Math.random()}
-                    onClick={() => handleNotificationClick(notif)}
-                    className={cn(
-                      "p-3.5 transition-colors cursor-pointer text-left hover:bg-slate-50 flex items-start gap-3 group relative",
-                      isUnread ? "bg-red-50/20" : "bg-white"
-                    )}
-                  >
-                    {/* Unread Red Dot Indicator */}
-                    <div className={cn(
-                      "w-2 h-2 rounded-full mt-1.5 shrink-0 transition-colors",
-                      isUnread ? "bg-red-500 shadow-sm" : "bg-slate-200"
-                    )} />
-                    
-                    <div className="flex-1 min-w-0 space-y-1">
-                      <p className={cn(
-                        "text-xs leading-relaxed transition-colors",
-                        isUnread ? "font-bold text-slate-900" : "font-medium text-slate-600"
-                      )}>
-                        {notif.message}
-                      </p>
-                      <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5">
-                        <div className="flex items-center gap-1.5">
-                          <Clock className="w-3 h-3 text-slate-400" />
-                          <span>{notif.timestamp ? (notif.timestamp.includes("-") ? notif.timestamp.substring(0, 16) : notif.timestamp) : "Recent"}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {isUnread && (
-                            <button
-                              type="button"
-                              onClick={(e) => handleMarkSingleAsRead(e, notif)}
-                              title="Mark as read"
-                              className="text-[10px] font-bold text-slate-500 hover:text-primary flex items-center gap-0.5 hover:underline"
-                            >
-                              Mark read
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            onClick={(e) => handleDeleteSingle(e, notif)}
-                            title="Delete notification"
-                            className="text-slate-400 hover:text-rose-600 p-1 rounded hover:bg-rose-50 transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </ScrollArea>
-
-        <div className="p-3 border-t border-slate-100 bg-slate-50 space-y-2">
-          <NotificationStatusControl user={verifiedUser} />
-          
-          <Button
-            variant="ghost"
-            size="sm"
-            disabled={unreadCount === 0}
-            className="w-full text-xs font-bold text-primary h-8 hover:bg-primary/5 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
-            onClick={async () => {
-              await handleMarkAllAsRead();
-            }}
-          >
-            <CheckCheck className="w-3.5 h-3.5" /> Mark as read
-          </Button>
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-}
+import { registerNativeUser, logoutNativeUser } from "@/lib/android-bridge";
 
 function HeaderActions() {
   const { verifiedUser } = useData();
@@ -464,8 +92,6 @@ function HeaderActions() {
 
   return (
     <div className="flex items-center gap-3 sm:gap-5">
-      <NotificationBell />
-      
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <div className="flex items-center gap-3 pl-2 cursor-pointer group hover:bg-slate-50 p-1 rounded-xl transition-colors">
@@ -678,8 +304,6 @@ function SidebarNav() {
     { title: "Mark Attendance", icon: UserCheck, path: "/dashboard/attendance", roles: ["EMPLOYEE", "SUPER_ADMIN", "ADMIN", "HR"], permission: "Attendance" },
     { title: "Approvals", icon: FileText, path: "/dashboard/approvals", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Approvals" },
     { title: "Employees", icon: UsersIcon, path: "/dashboard/employees", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Employees" },
-    { title: "Payroll", icon: CreditCard, path: "/dashboard/payroll", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Payroll" },
-    { title: "Vouchers", icon: FileText, path: "/dashboard/vouchers", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Vouchers" },
     { title: "Holidays", icon: Calendar, path: "/dashboard/holidays", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Holidays" },
     { title: "Reports", icon: BarChart3, path: "/dashboard/reports", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Reports" },
     { title: "Activity", icon: Smartphone, path: "/dashboard/activity", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Activity" },
@@ -724,7 +348,6 @@ function SidebarNav() {
       <SidebarFooter className="p-4">
         <Button variant="ghost" className="w-full justify-start text-rose-600 font-bold hover:bg-rose-50 hover:text-rose-700 group-data-[collapsible=icon]:p-2" onClick={() => {
           logoutNativeUser();
-          clearAppBadge();
           Cookies.remove('sikka_session', { path: '/' });
           localStorage.removeItem("user");
           router.push("/login");
@@ -752,29 +375,11 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
 
 
 
-  // Real-time Service Worker push listener for foreground sound, vibration and instant red dot update
-  useEffect(() => {
-    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) return;
-
-    const handleSwMessage = (event: MessageEvent) => {
-      if (event.data?.type === 'PUSH_NOTIFICATION_RECEIVED') {
-        playNotificationSoundAndVibrate();
-        refreshData();
-      }
-    };
-
-    navigator.serviceWorker.addEventListener('message', handleSwMessage);
-    return () => {
-      navigator.serviceWorker.removeEventListener('message', handleSwMessage);
-    };
-  }, [refreshData]);
-
-  // Register active user credentials with Android Native Bridge & request notification permission
+  // Register active user credentials with Android Native Bridge
   useEffect(() => {
     if (verifiedUser) {
       const empId = verifiedUser.employeeId || verifiedUser.username || verifiedUser.id || '';
       registerNativeUser(empId, verifiedUser.role || 'EMPLOYEE', verifiedUser.fullName || (verifiedUser as any).name || '');
-      requestAppNotificationPermission();
     }
   }, [verifiedUser]);
 
@@ -803,7 +408,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
           }).catch(() => {});
         },
         () => {},
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
       );
     };
 
@@ -827,7 +432,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
         }).catch(() => {});
       },
       () => {},
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
     );
 
     return () => {
@@ -861,8 +466,6 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
       "/dashboard/attendance": "Attendance",
       "/dashboard/approvals": "Approvals",
       "/dashboard/employees": "Employees",
-      "/dashboard/payroll": "Payroll",
-      "/dashboard/vouchers": "Vouchers",
       "/dashboard/holidays": "Holidays",
       "/dashboard/reports": "Reports",
       "/dashboard/activity": "Activity",
@@ -971,8 +574,6 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
             <HeaderActions />
           </header>
 
-          <NotificationBanner user={verifiedUser} />
-
           <main 
             className="flex-1 p-2 sm:p-4 overflow-y-auto bg-slate-50/50 outline-none"
             tabIndex={0}
@@ -1010,8 +611,6 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
             
             <HeaderActions />
           </header>
-
-          <NotificationBanner user={verifiedUser} />
 
           <main 
             className="flex-1 p-6 overflow-y-auto bg-slate-50/50 outline-none focus-visible:ring-1 focus-visible:ring-primary/10"

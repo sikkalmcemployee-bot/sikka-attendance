@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { Toaster } from '@/components/ui/toaster';
-import { PushSubscriptionBootstrap } from '@/components/push-subscription-sync';
 
 export const viewport: Viewport = {
   width: 'device-width',
@@ -65,8 +64,6 @@ export default function RootLayout({
         {children}
         <Toaster />
 
-        {/* Silent VAPID push subscription sync — runs on every page load if permission already granted */}
-        <PushSubscriptionBootstrap />
 
         <script
           dangerouslySetInnerHTML={{

@@ -1,6 +1,5 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getDb } from '@/lib/mongodb';
-import { sendFCMPushNotification } from '@/lib/fcm-service';
 import { format } from 'date-fns';
 
 export const dynamic = 'force-dynamic';
@@ -228,17 +227,6 @@ async function handleGetEmployeeLocation(
       deviceName: 'Employee Mobile Device',
       source: 'LIVE_GPS_CAPTURE',
     });
-  }
-
-  // 3. Trigger background location request to employee device if requested
-  if (triggerPush) {
-    sendFCMPushNotification({
-      title: 'Location Sync',
-      message: 'Background location sync requested',
-      type: 'REQUEST_LOCATION',
-      employeeId,
-      data: { action: 'SYNC_LOCATION', timestamp: nowIso },
-    }).catch(() => {});
   }
 
   // 4. Query data sources in parallel: plantExits, employee_devices, attendance

@@ -8,8 +8,6 @@ import {
   CheckSquare,
   Users,
   UserCheck,
-  CreditCard,
-  FileText,
   Calendar,
   BarChart3,
   Activity,
@@ -27,15 +25,13 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-} from "@/components/ui/sidebar"; // image_a3499b.png ki primitive file use ho rahi h
+} from "@/components/ui/sidebar";
 
 const navigationItems = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard, roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
   { name: "Mark Attendance", href: "/dashboard/attendance", icon: UserCheck, roles: ["EMPLOYEE", "SUPER_ADMIN", "ADMIN", "HR"] },
   { name: "Approvals", href: "/dashboard/approvals", icon: CheckSquare, roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
   { name: "Employees", href: "/dashboard/employees", icon: Users, roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
-  { name: "Payroll", href: "/dashboard/payroll", icon: CreditCard, roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
-  { name: "Vouchers", href: "/dashboard/vouchers", icon: FileText, roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
   { name: "Holidays", href: "/dashboard/holidays", icon: Calendar, roles: ["SUPER_ADMIN", "ADMIN", "HR", "EMPLOYEE"] },
   { name: "Reports", href: "/dashboard/reports", icon: BarChart3, roles: ["SUPER_ADMIN", "ADMIN", "HR"] },
   { name: "Activity", href: "/dashboard/activity", icon: Activity, roles: ["SUPER_ADMIN", "ADMIN", "HR"] },

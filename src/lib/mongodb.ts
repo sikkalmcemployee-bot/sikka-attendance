@@ -77,13 +77,12 @@ async function ensureIndexes(db: Db) {
     db.collection('attendance').createIndex({ approved: 1, date: -1 }, { background: true }).catch(() => { });
     db.collection('attendance').createIndex({ inPlant: 1, date: -1 }, { background: true }).catch(() => { });
     db.collection('employees').createIndex({ employeeId: 1 }, { background: true }).catch(() => { });
+    db.collection('employees').createIndex({ username: 1 }, { background: true }).catch(() => { });
     db.collection('employees').createIndex({ active: 1 }, { background: true }).catch(() => { });
     db.collection('employees').createIndex({ aadhaarNumber: 1 }, { background: true }).catch(() => { });
     db.collection('employees').createIndex({ mobileNumber: 1 }, { background: true }).catch(() => { });
     db.collection('leaveRequests').createIndex({ employeeId: 1, status: 1 }, { background: true }).catch(() => { });
     db.collection('leaveRequests').createIndex({ status: 1, fromDate: -1 }, { background: true }).catch(() => { });
-    db.collection('notifications').createIndex({ employeeId: 1, createdAt: -1 }, { background: true }).catch(() => { });
-    db.collection('notifications').createIndex({ createdAt: -1 }, { background: true }).catch(() => { });
     db.collection('plants').createIndex({ active: 1 }, { background: true }).catch(() => { });
   } catch { }
 }

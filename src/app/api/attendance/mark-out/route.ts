@@ -6,7 +6,6 @@ import { ObjectId } from 'mongodb';
 import { invalidateBootstrapCache, updateCachedCollection } from '@/lib/data-cache';
 import { parseDateTime } from '@/lib/utils';
 import { realtimeBroadcaster } from '@/lib/realtime-events';
-import { sendFCMPushNotification } from '@/lib/fcm-service';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,24 +45,43 @@ export async function POST(req: Request) {
       );
     }
 
-    const allEmployees = await employeesCol.find({}).toArray();
     const cleanSessionEmpId = sessionEmpId.replace(/\s/g, '').toUpperCase();
 
-    const matchedEmp = allEmployees.find((e: any) => {
-      const empId = String(e.employeeId || '').replace(/\s/g, '').toUpperCase();
-      const id = String(e.id || e._id || '').replace(/\s/g, '').toUpperCase();
-      const aadhaar = String(e.aadhaarNumber || e.aadhaar || '').replace(/\s/g, '').toUpperCase();
-      const mobile = String(e.mobileNumber || e.mobile || '').replace(/\s/g, '').toUpperCase();
-      const username = String(e.username || '').replace(/\s/g, '').toUpperCase();
-
-      return (
-        empId === cleanSessionEmpId ||
-        id === cleanSessionEmpId ||
-        aadhaar === cleanSessionEmpId ||
-        mobile === cleanSessionEmpId ||
-        username === cleanSessionEmpId
-      );
+    // Fast indexed direct employee lookup (sub-millisecond)
+    let matchedEmp = await employeesCol.findOne({
+      $or: [
+        { employeeId: cleanSessionEmpId },
+        { employeeId: sessionEmpId },
+        { id: cleanSessionEmpId },
+        { id: sessionEmpId },
+        { username: cleanSessionEmpId },
+        { username: sessionEmpId },
+        { aadhaarNumber: cleanSessionEmpId },
+        { aadhaar: cleanSessionEmpId },
+        { mobileNumber: cleanSessionEmpId },
+        { mobile: cleanSessionEmpId },
+      ]
     });
+
+    // Fallback if not matched on exact match
+    if (!matchedEmp) {
+      const allEmployees = await employeesCol.find({}).limit(200).toArray();
+      matchedEmp = allEmployees.find((e: any) => {
+        const empId = String(e.employeeId || '').replace(/\s/g, '').toUpperCase();
+        const id = String(e.id || e._id || '').replace(/\s/g, '').toUpperCase();
+        const aadhaar = String(e.aadhaarNumber || e.aadhaar || '').replace(/\s/g, '').toUpperCase();
+        const mobile = String(e.mobileNumber || e.mobile || '').replace(/\s/g, '').toUpperCase();
+        const username = String(e.username || '').replace(/\s/g, '').toUpperCase();
+
+        return (
+          empId === cleanSessionEmpId ||
+          id === cleanSessionEmpId ||
+          aadhaar === cleanSessionEmpId ||
+          mobile === cleanSessionEmpId ||
+          username === cleanSessionEmpId
+        );
+      });
+    }
 
     if (!matchedEmp) {
       return NextResponse.json(
@@ -253,49 +271,9 @@ export async function POST(req: Request) {
     // Fast in-memory cache mutation
     updateCachedCollection('attendance', 'UPDATE', savedRecord);
 
-    // Run non-critical telemetry, notification log & FCM push asynchronously
-    const notifTitle = `Mark OUT Successful (Session ${sessionIdx})`;
-    const notifMsg = `${empFullName} – Mark OUT Recorded (Session ${sessionIdx}) | Time: ${outTimeStr} | Worked: ${finalHours} hrs`;
-
-    Promise.allSettled([
-      db.collection('notifications').insertOne({
-        employeeId: internalEmpId,
-        employee_id: internalEmpId,
-        loginId: matchedEmp.employeeId || internalEmpId,
-        login_id: matchedEmp.employeeId || internalEmpId,
-        employeeName: empFullName,
-        title: notifTitle,
-        message: notifMsg,
-        timestamp: format(now, "yyyy-MM-dd HH:mm:ss"),
-        notificationDateTime: now.toISOString(),
-        read: false,
-        isRead: false,
-        readStatus: 'UNREAD',
-        read_status: 'UNREAD',
-        type: 'MARK_OUT',
-        notificationType: 'MARK_OUT',
-        notification_type: 'MARK_OUT',
-        action: 'MARK_OUT',
-        source: 'ATTENDANCE_PUNCH',
-        createdBy: internalEmpId,
-        createdAt: now.toISOString(),
-        updatedAt: now.toISOString(),
-      }),
-      sendFCMPushNotification({
-        title: notifTitle,
-        message: notifMsg,
-        type: 'MARK_OUT',
-        employeeId: internalEmpId,
-        targetRole: 'EMPLOYEE',
-        data: {
-          type: 'MARK_OUT',
-          notificationType: 'MARK_OUT',
-          sessionIndex: String(sessionIdx),
-          time: outTimeStr,
-          hours: String(finalHours),
-        },
-      }),
-      (typeof finalLat === 'number' && typeof finalLng === 'number' && !isNaN(finalLat) && !isNaN(finalLng)) ? db.collection('employee_devices').updateOne(
+    // Run non-critical telemetry asynchronously
+    if (typeof finalLat === 'number' && typeof finalLng === 'number' && !isNaN(finalLat) && !isNaN(finalLng)) {
+      db.collection('employee_devices').updateOne(
         {
           $or: [
             { employeeId: internalEmpId },
@@ -323,8 +301,8 @@ export async function POST(req: Request) {
           },
         },
         { upsert: true }
-      ) : Promise.resolve(),
-    ]).catch(() => {});
+      ).catch(() => {});
+    }
 
     // Broadcast real-time event to active clients
     realtimeBroadcaster.broadcast('attendance_updated', {

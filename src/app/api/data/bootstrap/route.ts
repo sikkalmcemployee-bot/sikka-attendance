@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/mongodb';
-import { getCachedBootstrapData, setCachedBootstrapData } from '@/lib/data-cache';
+import { getCachedBootstrapData, setCachedBootstrapData, getInFlightPromise, setInFlightPromise } from '@/lib/data-cache';
 import { cookies } from 'next/headers';
 
 export const dynamic = 'force-dynamic';
@@ -12,8 +12,6 @@ const ADMIN_ROLES = ['SUPER_ADMIN', 'ADMIN', 'HR'];
 /**
  * High-Performance Single-Roundtrip Data Bootstrap API
  * Returns all necessary MongoDB collections in a single unified payload.
- * Notifications are filtered by the logged-in user's employee ID for security.
- * Admin roles receive all notifications.
  */
 export async function GET(req: Request) {
   try {
@@ -59,6 +57,20 @@ export async function GET(req: Request) {
           },
         });
       }
+
+      // Deduplicate concurrent in-flight admin requests to avoid duplicate DB query storms
+      const inFlight = getInFlightPromise();
+      if (inFlight && isAdmin) {
+        const payload = await inFlight;
+        if (payload) {
+          return NextResponse.json(payload, {
+            headers: {
+              'Cache-Control': 'no-cache, must-revalidate',
+              'X-Cache-Status': 'COALESCED',
+            },
+          });
+        }
+      }
     }
 
     const db = await getDb().catch((err) => {
@@ -70,30 +82,10 @@ export async function GET(req: Request) {
     }
 
     // Build employee-specific queries if authenticated as standard employee
-    let notificationQuery: any = {};
     let attendanceQuery: any = {};
     const targetIds = new Set<string>();
-    const EXCLUDED_REMINDER_TYPES = [
-      'DAY_MARK_IN_REMINDER',
-      'DAY_MARK_OUT_REMINDER',
-      'NIGHT_MARK_IN_REMINDER',
-      'NIGHT_MARK_OUT_REMINDER',
-      'SHIFT_REMINDER',
-      'DAY_IN_REMINDER',
-      'DAY_OUT_REMINDER',
-      'NIGHT_IN_REMINDER',
-      'NIGHT_OUT_REMINDER',
-      'REMINDER'
-    ];
 
-    if (isAdmin) {
-      notificationQuery = {
-        type: { $nin: EXCLUDED_REMINDER_TYPES },
-        notificationType: { $nin: EXCLUDED_REMINDER_TYPES },
-        notification_type: { $nin: EXCLUDED_REMINDER_TYPES },
-        reminderType: { $exists: false },
-      };
-    } else if (sessionEmpId) {
+    if (!isAdmin && sessionEmpId) {
       targetIds.add(sessionEmpId);
       // Resolve all aliases for this employee
       const matchedEmp = await db.collection('employees').findOne({
@@ -122,15 +114,6 @@ export async function GET(req: Request) {
 
       const empIds = Array.from(targetIds).filter(Boolean);
 
-      // STRICT: only this employee's non-reminder notifications
-      notificationQuery = {
-        employeeId: { $in: empIds },
-        type: { $nin: EXCLUDED_REMINDER_TYPES },
-        notificationType: { $nin: EXCLUDED_REMINDER_TYPES },
-        notification_type: { $nin: EXCLUDED_REMINDER_TYPES },
-        reminderType: { $exists: false },
-      };
-
       // Build attendance query: employee gets complete personal history
       attendanceQuery = {
         $or: [
@@ -140,84 +123,93 @@ export async function GET(req: Request) {
       };
     }
 
-    // Fetch all collections in parallel without arbitrary truncation
-    const [
-      employees,
-      attendance,
-      plants,
-      holidays,
-      leaveRequests,
-      notifications,
-      vouchers,
-      firms,
-      users,
-      payroll,
-    ] = await Promise.all([
-      db.collection('employees').find({}).batchSize(500).toArray().catch((err) => { console.error('[Bootstrap] employees error:', err); return []; }),
-      db.collection('attendance').find(attendanceQuery, {
-        projection: {
-          employeeId: 1,
-          employeeName: 1,
-          date: 1,
-          inDate: 1,
-          outDate: 1,
-          inTime: 1,
-          outTime: 1,
-          hours: 1,
-          status: 1,
-          attendanceType: 1,
-          approved: 1,
-          approvedBy: 1,
-          inPlant: 1,
-          outPlant: 1,
-          remark: 1,
-          address: 1,
-          addressOut: 1,
-          autoCheckout: 1,
-          autoOut: 1,
-          unapprovedOutDuration: 1,
-          inDateTime: 1,
-          outDateTime: 1,
-          approvalActionDate: 1,
-          editedBy: 1,
-          createdAt: 1,
-          updatedAt: 1,
-          exitEvents: 1,
-          currentGeofenceStatus: 1,
-          latitude: 1,
-          longitude: 1,
-          latitudeOut: 1,
-          longitudeOut: 1,
-          gpsLatitude: 1,
-          gpsLongitude: 1,
-          area: 1,
-          areaOut: 1,
-          accuracy: 1,
-          accuracyOut: 1
-        }
-      }).batchSize(5000).sort({ date: -1 }).toArray().catch((err) => { console.error('[Bootstrap] attendance error:', err); return []; }),
-      db.collection('plants').find({}).toArray().catch((err) => { console.error('[Bootstrap] plants error:', err); return []; }),
-      db.collection('holidays').find({}).toArray().catch((err) => { console.error('[Bootstrap] holidays error:', err); return []; }),
-      db.collection('leaveRequests').find({}).sort({ createdAt: -1, fromDate: -1 }).toArray().catch((err) => { console.error('[Bootstrap] leaveRequests error:', err); return []; }),
-      db.collection('notifications').find(notificationQuery).sort({ createdAt: -1, timestamp: -1, _id: -1 }).limit(isAdmin ? 200 : 100).toArray().catch((err) => { console.error('[Bootstrap] notifications error:', err); return []; }),
-      db.collection('vouchers').find({}).sort({ date: -1 }).toArray().catch((err) => { console.error('[Bootstrap] vouchers error:', err); return []; }),
-      db.collection('firms').find({}).toArray().catch((err) => { console.error('[Bootstrap] firms error:', err); return []; }),
-      db.collection('users').find({}).toArray().catch((err) => { console.error('[Bootstrap] users error:', err); return []; }),
-      db.collection('payroll').find({}).sort({ createdAt: -1 }).toArray().catch((err) => { console.error('[Bootstrap] payroll error:', err); return []; }),
-    ]);
+    const fetchPromise = (async () => {
+      // Fetch all collections in parallel without arbitrary truncation
+      const [
+        employees,
+        attendance,
+        plants,
+        holidays,
+        leaveRequests,
+        firms,
+        users,
+      ] = await Promise.all([
+        db.collection('employees').find({}).batchSize(500).toArray().catch((err) => { console.error('[Bootstrap] employees error:', err); return []; }),
+        db.collection('attendance').find(attendanceQuery, {
+          projection: {
+            employeeId: 1,
+            employeeName: 1,
+            date: 1,
+            inDate: 1,
+            outDate: 1,
+            inTime: 1,
+            outTime: 1,
+            hours: 1,
+            status: 1,
+            attendanceType: 1,
+            approved: 1,
+            approvedBy: 1,
+            inPlant: 1,
+            outPlant: 1,
+            remark: 1,
+            address: 1,
+            addressOut: 1,
+            autoCheckout: 1,
+            autoOut: 1,
+            unapprovedOutDuration: 1,
+            inDateTime: 1,
+            outDateTime: 1,
+            approvalActionDate: 1,
+            editedBy: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            exitEvents: 1,
+            currentGeofenceStatus: 1,
+            latitude: 1,
+            longitude: 1,
+            latitudeOut: 1,
+            longitudeOut: 1,
+            gpsLatitude: 1,
+            gpsLongitude: 1,
+            area: 1,
+            areaOut: 1,
+            accuracy: 1,
+            accuracyOut: 1
+          }
+        }).batchSize(5000).sort({ date: -1 }).toArray().catch((err) => { console.error('[Bootstrap] attendance error:', err); return []; }),
+        db.collection('plants').find({}).toArray().catch((err) => { console.error('[Bootstrap] plants error:', err); return []; }),
+        db.collection('holidays').find({}).toArray().catch((err) => { console.error('[Bootstrap] holidays error:', err); return []; }),
+        db.collection('leaveRequests').find({}).sort({ createdAt: -1, fromDate: -1 }).toArray().catch((err) => { console.error('[Bootstrap] leaveRequests error:', err); return []; }),
+        db.collection('firms').find({}).toArray().catch((err) => { console.error('[Bootstrap] firms error:', err); return []; }),
+        db.collection('users').find({}).toArray().catch((err) => { console.error('[Bootstrap] users error:', err); return []; }),
+      ]);
 
-    const payload = {
-      employees,
-      attendance,
-      plants,
-      holidays,
-      leaveRequests,
-      notifications,
-      vouchers,
-      firms,
-      users,
-      payroll,
-    };
+      return {
+        employees,
+        attendance,
+        plants,
+        holidays,
+        leaveRequests,
+        notifications: [],
+        vouchers: [],
+        firms,
+        users,
+        payroll: [],
+      };
+    })();
+
+    if (isAdmin) {
+      setInFlightPromise(fetchPromise);
+    }
+
+    let payload;
+    try {
+      payload = await fetchPromise;
+    } finally {
+      if (isAdmin) {
+        setInFlightPromise(null);
+      }
+    }
 
     // Store in in-memory cache for fast sub-millisecond future requests
     setCachedBootstrapData(payload, cacheKey);

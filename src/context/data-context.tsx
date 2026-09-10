@@ -10,12 +10,10 @@ import {
   Firm, 
   User, 
   Holiday, 
-  AppNotification,
   LeaveRequest
 } from '@/lib/types';
 import { useToast } from '@/hooks/use-toast';
 import Cookies from 'js-cookie';
-import { autoSubscribeIfPermitted } from '@/lib/notification-client';
 
 interface DataContextType {
   employees: Employee[];
@@ -26,7 +24,7 @@ interface DataContextType {
   firms: Firm[];
   users: User[];
   holidays: Holiday[];
-  notifications: AppNotification[];
+  notifications: any[];
   leaveRequests: LeaveRequest[];
   addRecord: (col: string, data: any, skipRefresh?: boolean) => Promise<void>;
   updateRecord: (col: string, id: string, data: any, skipRefresh?: boolean) => Promise<void>;
@@ -70,13 +68,13 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const [employees, setEmployees] = useState<Employee[]>(() => initialCache?.employees || []);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>(() => initialCache?.attendance || []);
-  const [vouchers, setVouchers] = useState<Voucher[]>(() => initialCache?.vouchers || []);
-  const [payrollRecords, setPayrollRecords] = useState<PayrollRecord[]>(() => initialCache?.payroll || []);
+  const vouchers: Voucher[] = [];
+  const payrollRecords: PayrollRecord[] = [];
   const [plants, setPlants] = useState<Plant[]>(() => initialCache?.plants || []);
   const [firms, setFirms] = useState<Firm[]>(() => initialCache?.firms || []);
   const [users, setUsers] = useState<User[]>(() => initialCache?.users || []);
   const [holidays, setHolidays] = useState<Holiday[]>(() => initialCache?.holidays || []);
-  const [notifications, setNotifications] = useState<AppNotification[]>(() => initialCache?.notifications || []);
+  const notifications: any[] = [];
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>(() => initialCache?.leaveRequests || []);
   const [isLoading, setIsLoading] = useState<boolean>(() => !initialCache);
 
@@ -116,10 +114,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             if (Array.isArray(cached.holidays) && cached.holidays.length > 0) setHolidays(cached.holidays);
             if (Array.isArray(cached.leaveRequests) && cached.leaveRequests.length > 0) setLeaveRequests(cached.leaveRequests);
             if (Array.isArray(cached.notifications)) setNotifications(cached.notifications);
-            if (Array.isArray(cached.vouchers) && cached.vouchers.length > 0) setVouchers(cached.vouchers);
             if (Array.isArray(cached.firms) && cached.firms.length > 0) setFirms(cached.firms);
             if (Array.isArray(cached.users) && cached.users.length > 0) setUsers(cached.users);
-            if (Array.isArray(cached.payroll) && cached.payroll.length > 0) setPayrollRecords(cached.payroll);
             setIsLoading(false);
           }
         }
@@ -183,20 +179,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           if (Array.isArray(bundle.leaveRequests)) {
             setLeaveRequests(prev => (bundle.leaveRequests.length > 0 || prev.length === 0 ? bundle.leaveRequests : prev));
           }
-          if (Array.isArray(bundle.notifications)) {
-            setNotifications(bundle.notifications);
-          }
-          if (Array.isArray(bundle.vouchers)) {
-            setVouchers(prev => (bundle.vouchers.length > 0 || prev.length === 0 ? bundle.vouchers : prev));
-          }
           if (Array.isArray(bundle.firms)) {
             setFirms(prev => (bundle.firms.length > 0 || prev.length === 0 ? bundle.firms : prev));
           }
           if (Array.isArray(bundle.users)) {
             setUsers(prev => (bundle.users.length > 0 || prev.length === 0 ? bundle.users : prev));
-          }
-          if (Array.isArray(bundle.payroll)) {
-            setPayrollRecords(prev => (bundle.payroll.length > 0 || prev.length === 0 ? bundle.payroll : prev));
           }
           setIsLoading(false);
           lastFetchTimeRef.current = Date.now();
@@ -214,7 +201,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       }
 
       // 2. Direct fallback in case of network variance
-      const collectionsToFetch = ['employees', 'attendance', 'plants', 'holidays', 'leaveRequests', 'notifications', 'vouchers', 'firms', 'users', 'payroll'];
+      const collectionsToFetch = ['employees', 'attendance', 'plants', 'holidays', 'leaveRequests', 'firms', 'users'];
       const results = await Promise.all(
         collectionsToFetch.map(col =>
           fetch(`/api/data/${col}`, { cache: 'no-store' })
@@ -238,14 +225,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       // SAFE FALLBACK: Only update if the endpoint actually returned non-null array
       if (Array.isArray(dataMap['employees']) && dataMap['employees'].length > 0) setEmployees(dataMap['employees']);
       if (Array.isArray(dataMap['attendance']) && dataMap['attendance'].length > 0) setAttendanceRecords(dataMap['attendance']);
-      if (Array.isArray(dataMap['vouchers']) && dataMap['vouchers'].length > 0) setVouchers(dataMap['vouchers']);
-      if (Array.isArray(dataMap['payroll']) && dataMap['payroll'].length > 0) setPayrollRecords(dataMap['payroll']);
       if (Array.isArray(dataMap['plants']) && dataMap['plants'].length > 0) setPlants(dataMap['plants']);
       if (Array.isArray(dataMap['firms']) && dataMap['firms'].length > 0) setFirms(dataMap['firms']);
       if (Array.isArray(dataMap['users']) && dataMap['users'].length > 0) setUsers(dataMap['users']);
       if (Array.isArray(dataMap['holidays']) && dataMap['holidays'].length > 0) setHolidays(dataMap['holidays']);
       if (Array.isArray(dataMap['leaveRequests']) && dataMap['leaveRequests'].length > 0) setLeaveRequests(dataMap['leaveRequests']);
-      if (Array.isArray(dataMap['notifications'])) setNotifications(dataMap['notifications']);
 
     } catch (error) {
       console.error("Failed to fetch data efficiently:", error);
@@ -258,15 +242,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     fetchData();
   }, [currentUserId, fetchData]);
-
-  // Silently refresh VAPID push subscription after each successful session load
-  useEffect(() => {
-    if (!currentUser) return;
-    const t = setTimeout(() => {
-      autoSubscribeIfPermitted(currentUser).catch(() => {});
-    }, 4000);
-    return () => clearTimeout(t);
-  }, [currentUser]);
 
   // Real-time live synchronization via Server-Sent Events (SSE) stream + debounced refresher
   useEffect(() => {
@@ -321,10 +296,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     connectSSE();
 
-    // High-frequency periodic background auto-refresh (every 10s)
+    // Periodic background fallback sync (every 60s - SSE provides instant live updates)
     const backgroundRefreshTimer = setInterval(() => {
       fetchData(false);
-    }, 10000);
+    }, 60000);
 
     // Instant focus & visibility refresh (refreshes if >2s since last fetch)
     const onVisibilityChange = () => {
@@ -395,8 +370,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       setLeaveRequests(prev => [newRecord, ...prev]);
     } else if (col === 'employees') {
       setEmployees(prev => [...prev, newRecord]);
-    } else if (col === 'notifications') {
-      setNotifications(prev => [newRecord, ...prev]);
     }
 
     try {
@@ -460,7 +433,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   };
 
   const deleteRecord = async (col: string, id: string, skipRefresh = false) => {
-    if (col !== 'notifications' && currentUser?.role !== 'SUPER_ADMIN') {
+    if (currentUser?.role !== 'SUPER_ADMIN') {
       toast({
         variant: "destructive",
         title: "Permission Denied",
@@ -469,9 +442,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    if (col === 'notifications') {
-      setNotifications(prev => prev.filter(n => String(n.id || (n as any)._id || '') !== String(id)));
-    } else if (col === 'attendance') {
+    if (col === 'attendance') {
       setAttendanceRecords(prev => prev.filter(r => String(r.id || (r as any)._id || '') !== String(id)));
     } else if (col === 'leaveRequests') {
       setLeaveRequests(prev => prev.filter(l => String(l.id || (l as any)._id || '') !== String(id)));
@@ -497,25 +468,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
-  const clearAllNotifications = async (empId?: string, isGlobal = false) => {
-    // 1. Instant 0ms optimistic UI wipe
-    setNotifications([]);
-
-    // 2. Batch clear in MongoDB
-    try {
-      await fetch('/api/notifications/clear', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          employeeId: empId || currentUser?.employeeId || currentUser?.username || currentUser?.id,
-          role: currentUser?.role,
-          clearAllGlobal: isGlobal || ['SUPER_ADMIN', 'ADMIN', 'HR'].includes(String(currentUser?.role || '').toUpperCase())
-        })
-      });
-    } catch (err) {
-      console.error('clearAllNotifications error:', err);
-    }
-  };
+  const clearAllNotifications = async () => {};
 
   const value = useMemo(() => ({
     employees,
