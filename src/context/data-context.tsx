@@ -412,6 +412,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
         const eId = String(e.id || (e as any)._id || '');
         return eId === String(id) ? { ...e, ...payload } : e;
       }));
+    } else if (col === 'users') {
+      setUsers(prev => prev.map(u => {
+        const uId = String(u.id || (u as any)._id || '');
+        return (uId === String(id) || (data.username && u.username === data.username)) ? { ...u, ...payload } : u;
+      }));
     }
 
     try {

@@ -337,8 +337,11 @@ export default function UserManagementPage() {
       };
 
       if (editingUser) {
-        const finalId = editingUser.id || (editingUser as any)._id;
-        let updatePayload: Partial<User> = { ...baseUserData };
+        const finalId = editingUser.id || (editingUser as any)._id || editingUser.username;
+        let updatePayload: Partial<User> = { 
+          ...baseUserData,
+          username: formData.username || editingUser.username
+        };
 
         if (isResetPasswordOpen && formData.password) {
           updatePayload.password = formData.password;

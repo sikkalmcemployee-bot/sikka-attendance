@@ -94,12 +94,18 @@ export async function GET(
       return NextResponse.json([]);
     }
 
-    if (collection === 'attendance') {
-      const data = await db.collection(collection).find({}).sort({ date: -1, inDateTime: -1, _id: -1 }).toArray();
-      return NextResponse.json(data);
-    }
+    const rawData = collection === 'attendance'
+      ? await db.collection(collection).find({}).sort({ date: -1, inDateTime: -1, _id: -1 }).toArray()
+      : await db.collection(collection).find({}).toArray();
 
-    const data = await db.collection(collection).find({}).toArray();
+    const data = rawData.map(doc => {
+      const strId = String(doc._id || doc.id || '');
+      return {
+        ...doc,
+        _id: strId,
+        id: doc.id || strId
+      };
+    });
     return NextResponse.json(data);
   } catch (error: any) {
     if (error?.digest === 'DYNAMIC_SERVER_USAGE' || error?.message?.includes('Dynamic server usage')) {
@@ -207,10 +213,32 @@ export async function PUT(
     delete updateData._id;
     delete updateData.id;
 
-    let query: any = { id: id };
+    const orConditions: any[] = [
+      { _id: id },
+      { id: id }
+    ];
+
     if (ObjectId.isValid(id)) {
-      query = { $or: [{ _id: new ObjectId(id) }, { id: id }, { _id: id }] };
+      try {
+        orConditions.push({ _id: new ObjectId(id) });
+      } catch {}
     }
+
+    if (collection === 'users') {
+      orConditions.push({ username: id });
+      if (updateData.username) {
+        orConditions.push({ username: updateData.username });
+      }
+    }
+
+    if (collection === 'employees') {
+      orConditions.push({ employeeId: id });
+      if (updateData.employeeId) {
+        orConditions.push({ employeeId: updateData.employeeId });
+      }
+    }
+
+    const query = { $or: orConditions };
 
     const result = await db.collection(collection).updateOne(
       query,
@@ -254,10 +282,26 @@ export async function DELETE(
 
     const db = await getDb();
 
-    let query: any = { id: id };
+    const orConditions: any[] = [
+      { _id: id },
+      { id: id }
+    ];
+
     if (ObjectId.isValid(id)) {
-      query = { $or: [{ _id: new ObjectId(id) }, { id: id }, { _id: id }] };
+      try {
+        orConditions.push({ _id: new ObjectId(id) });
+      } catch {}
     }
+
+    if (collection === 'users') {
+      orConditions.push({ username: id });
+    }
+
+    if (collection === 'employees') {
+      orConditions.push({ employeeId: id });
+    }
+
+    const query = { $or: orConditions };
 
     const result = await db.collection(collection).deleteOne(query);
 

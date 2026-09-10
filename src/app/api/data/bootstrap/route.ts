@@ -184,16 +184,28 @@ export async function GET(req: Request) {
         db.collection('users').find({}).toArray().catch((err) => { console.error('[Bootstrap] users error:', err); return []; }),
       ]);
 
+      const normalizeList = (list: any[]) => {
+        return (list || []).map(item => {
+          if (!item) return item;
+          const strId = String(item._id || item.id || '');
+          return {
+            ...item,
+            _id: strId,
+            id: item.id || strId
+          };
+        });
+      };
+
       return {
-        employees,
-        attendance,
-        plants,
-        holidays,
-        leaveRequests,
+        employees: normalizeList(employees),
+        attendance: normalizeList(attendance),
+        plants: normalizeList(plants),
+        holidays: normalizeList(holidays),
+        leaveRequests: normalizeList(leaveRequests),
         notifications: [],
         vouchers: [],
-        firms,
-        users,
+        firms: normalizeList(firms),
+        users: normalizeList(users),
         payroll: [],
       };
     })();
