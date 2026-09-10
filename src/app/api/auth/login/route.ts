@@ -47,6 +47,7 @@ export async function POST(req: Request) {
         role: cleanRole,
         fullName: (user as any).fullName || 'User',
         plantIds: (user as any).plantIds || [],
+        permissions: (user as any).permissions || [],
       };
 
       return NextResponse.json({ message: 'Login successful', ...sessionData }, { status: 200 });

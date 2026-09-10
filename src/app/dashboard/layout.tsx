@@ -69,6 +69,7 @@ import { useToast } from "@/hooks/use-toast";
 import Cookies from 'js-cookie';
 import { format } from "date-fns";
 import { registerNativeUser, logoutNativeUser } from "@/lib/android-bridge";
+import { APP_MODULES, checkUserModuleAccess } from "@/lib/modules";
 
 function HeaderActions() {
   const { verifiedUser } = useData();
@@ -298,24 +299,19 @@ function SidebarNav() {
 
   if (!verifiedUser) return null;
 
-  // FIXED: "Leave Approvals" entry list has been fully removed from the menu schema array
-  const menuItems = [
-    { title: "Dashboard", icon: LayoutDashboard, path: "/dashboard", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Dashboard" },
-    { title: "Mark Attendance", icon: UserCheck, path: "/dashboard/attendance", roles: ["EMPLOYEE", "SUPER_ADMIN", "ADMIN", "HR"], permission: "Attendance" },
-    { title: "Approvals", icon: FileText, path: "/dashboard/approvals", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Approvals" },
-    { title: "Employees", icon: UsersIcon, path: "/dashboard/employees", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Employees" },
-    { title: "Holidays", icon: Calendar, path: "/dashboard/holidays", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Holidays" },
-    { title: "Reports", icon: BarChart3, path: "/dashboard/reports", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Reports" },
-    { title: "Activity", icon: Smartphone, path: "/dashboard/activity", roles: ["SUPER_ADMIN", "ADMIN", "HR"], permission: "Activity" },
-    { title: "Plants & Firms", icon: Factory, path: "/dashboard/settings/firms", roles: ["SUPER_ADMIN", "ADMIN"], permission: "Settings" },
-    { title: "Users", icon: Settings, path: "/dashboard/settings/users", roles: ["SUPER_ADMIN"], permission: "Users" },
-  ];
+  const userRole = String(verifiedUser.role || '').toUpperCase();
+  const isEmployeeRole = userRole === 'EMPLOYEE' ||
+    (Array.isArray(verifiedUser.role) && verifiedUser.role.map((r: any) => String(r).toUpperCase()).includes('EMPLOYEE')) ||
+    (!!verifiedUser.employeeId && !['SUPER_ADMIN', 'ADMIN', 'HR', 'SECURITY', 'USER'].includes(userRole));
 
-  const filteredMenu = menuItems.filter(item => {
-    const isSuperAdmin = verifiedUser.role === 'SUPER_ADMIN';
-    const hasRole = item.roles.includes(verifiedUser.role);
-    const hasPermission = isSuperAdmin || item.permission === 'Dashboard' || verifiedUser.permissions?.includes(item.permission);
-    return hasRole && hasPermission;
+  const filteredMenu = APP_MODULES.filter(item => {
+    if (userRole === 'SUPER_ADMIN') return true;
+
+    if (isEmployeeRole) {
+      return item.path === '/dashboard/attendance' || item.path === '/dashboard/holidays';
+    }
+
+    return checkUserModuleAccess(verifiedUser, item.id);
   });
 
   return (
@@ -335,11 +331,11 @@ function SidebarNav() {
               <SidebarMenuButton 
                 isActive={pathname === item.path}
                 onClick={() => router.push(item.path)}
-                tooltip={item.title}
+                tooltip={item.name}
                 className="h-11 px-3"
               >
                 <item.icon className="w-5 h-5 mr-3" />
-                <span className="font-bold group-data-[collapsible=icon]:hidden">{item.title}</span>
+                <span className="font-bold group-data-[collapsible=icon]:hidden">{item.name}</span>
               </SidebarMenuButton>
             </SidebarMenuItem>
           ))}
@@ -448,7 +444,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
     const userRole = String(verifiedUser.role || '').toUpperCase();
     const isEmployeeRole = userRole === 'EMPLOYEE' ||
       (Array.isArray(verifiedUser.role) && verifiedUser.role.map((r: any) => String(r).toUpperCase()).includes('EMPLOYEE')) ||
-      (!!verifiedUser.employeeId && !['SUPER_ADMIN', 'ADMIN', 'HR', 'USER'].includes(userRole));
+      (!!verifiedUser.employeeId && !['SUPER_ADMIN', 'ADMIN', 'HR', 'SECURITY', 'USER'].includes(userRole));
 
     // Mark Attendance & Holidays are accessible by Employee role
     if (isEmployeeRole) {
@@ -461,35 +457,20 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const menuPermissions: Record<string, string> = {
-      "/dashboard": "Dashboard",
-      "/dashboard/attendance": "Attendance",
-      "/dashboard/approvals": "Approvals",
-      "/dashboard/employees": "Employees",
-      "/dashboard/holidays": "Holidays",
-      "/dashboard/reports": "Reports",
-      "/dashboard/activity": "Activity",
-      "/dashboard/settings/firms": "Settings",
-      "/dashboard/settings/users": "Users"
-    };
-
-    const requiredPermission = menuPermissions[pathname];
     const isSuperAdmin = userRole === 'SUPER_ADMIN';
-    
     if (isSuperAdmin) {
       setIsAuthorized(true);
-    } else if (requiredPermission) {
-      const hasPerm = (verifiedUser.permissions || []).includes(requiredPermission) || (requiredPermission === "Dashboard" && !isEmployeeRole);
-      setIsAuthorized(hasPerm);
-    } else {
-      setIsAuthorized(true); 
+      return;
     }
+
+    const hasPerm = checkUserModuleAccess(verifiedUser, pathname);
+    setIsAuthorized(hasPerm);
   }, [verifiedUser, pathname, router]);
 
   const userRoleUpper = String(verifiedUser?.role || '').toUpperCase();
   const isEmployee = userRoleUpper === 'EMPLOYEE' ||
     (Array.isArray(verifiedUser?.role) && verifiedUser.role.map((r: any) => String(r).toUpperCase()).includes('EMPLOYEE')) ||
-    (!!verifiedUser?.employeeId && !['SUPER_ADMIN', 'ADMIN', 'HR', 'USER'].includes(userRoleUpper));
+    (!!verifiedUser?.employeeId && !['SUPER_ADMIN', 'ADMIN', 'HR', 'SECURITY', 'USER'].includes(userRoleUpper));
 
   // Only show minimal loader if user session has not loaded yet
   if (!isMounted || (!verifiedUser && isLoading)) {
@@ -542,9 +523,12 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
         </p>
         <Button 
           className="bg-primary px-8 h-12 rounded-xl font-bold shadow-lg shadow-primary/20 gap-2"
-          onClick={() => router.push(userRoleUpper === 'EMPLOYEE' ? "/dashboard/attendance" : "/dashboard")}
+          onClick={() => {
+            const firstAllowed = APP_MODULES.find(m => checkUserModuleAccess(verifiedUser, m.id));
+            router.push(firstAllowed?.path || (userRoleUpper === 'EMPLOYEE' ? "/dashboard/attendance" : "/dashboard"));
+          }}
         >
-          <ArrowLeft className="w-4 h-4" /> Go Back Home
+          <ArrowLeft className="w-4 h-4" /> Go to Authorized Module
         </Button>
       </div>
     );

@@ -15,7 +15,7 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [selectedRole, setSelectedRole] = useState<'EMPLOYEE' | 'HR' | 'ADMIN'>('EMPLOYEE');
+  const [selectedRole, setSelectedRole] = useState<'EMPLOYEE' | 'HR' | 'ADMIN' | 'SECURITY'>('EMPLOYEE');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -267,6 +267,7 @@ export default function LoginPage() {
                 onChange={(e) => setSelectedRole(e.target.value as any)}
               >
                 <option value="EMPLOYEE">Employee</option>
+                <option value="SECURITY">Security</option>
                 <option value="HR">HR</option>
                 <option value="ADMIN">Admin</option>
               </select>
