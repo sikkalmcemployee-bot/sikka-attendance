@@ -43,34 +43,39 @@ interface CorrectionEntry {
 }
 
 function resolveInDT(record: any): Date | null {
-  let inDT: Date | null = null;
+  if (record.inDate && record.inTime) {
+    const d = parseDateTime(record.inDate, record.inTime);
+    if (d && isValid(d)) return d;
+  }
+  if (record.date && record.inTime) {
+    const d = parseDateTime(record.date, record.inTime);
+    if (d && isValid(d)) return d;
+  }
   if (record.inDateTime) {
     try {
       const d = parseISO(record.inDateTime);
-      if (isValid(d)) inDT = d;
+      if (isValid(d)) return d;
     } catch {}
   }
-  if (!inDT && record.inDate && record.inTime) {
-    inDT = parseDateTime(record.inDate, record.inTime);
-  }
-  if (!inDT && record.date && record.inTime) {
-    inDT = parseDateTime(record.date, record.inTime);
-  }
-  return inDT && isValid(inDT) ? inDT : null;
+  return null;
 }
 
 function resolveOutDT(record: any): Date | null {
-  let outDT: Date | null = null;
+  if (record.outDate && record.outTime) {
+    const d = parseDateTime(record.outDate, record.outTime);
+    if (d && isValid(d)) return d;
+  }
+  if (record.date && record.outTime) {
+    const d = parseDateTime(record.date, record.outTime);
+    if (d && isValid(d)) return d;
+  }
   if (record.outDateTime) {
     try {
       const d = parseISO(record.outDateTime);
-      if (isValid(d)) outDT = d;
+      if (isValid(d)) return d;
     } catch {}
   }
-  if (!outDT && record.outDate && record.outTime) {
-    outDT = parseDateTime(record.outDate, record.outTime);
-  }
-  return outDT && isValid(outDT) ? outDT : null;
+  return null;
 }
 
 export async function GET() {
@@ -167,10 +172,19 @@ async function runAuditCorrection(applyFixes: boolean) {
       }
 
       // -- Case 2: Manual OUT records ---------------------------------------
-      const outDT = resolveOutDT(record);
+      let outDT = resolveOutDT(record);
       if (!outDT) continue;
 
-      const diffMs = outDT.getTime() - inDT.getTime();
+      let diffMs = outDT.getTime() - inDT.getTime();
+
+      if (diffMs < 0) {
+        // Check if midnight crossing was not reflected in outDate
+        const nextDayOutDT = addHours(outDT, 24);
+        if (nextDayOutDT.getTime() - inDT.getTime() >= 0 && nextDayOutDT.getTime() - inDT.getTime() <= 24 * 3600 * 1000) {
+          outDT = nextDayOutDT;
+          diffMs = outDT.getTime() - inDT.getTime();
+        }
+      }
 
       if (diffMs < 0) {
         // Impossible: OUT is before IN - apply session fallback
@@ -210,13 +224,13 @@ async function runAuditCorrection(applyFixes: boolean) {
         continue;
       }
 
-      // Recalculate actual hours from precise timestamps
-      const actualHours = parseFloat(
-        (diffMs / (1000 * 60 * 60)).toFixed(2)
-      );
+      // Calculate exact minute difference
+      const elapsedMinutes = Math.max(0, Math.round(diffMs / 60000));
+      const actualHours = parseFloat((elapsedMinutes / 60).toFixed(4));
 
-      // Flag if stored hours differ from recalculated by more than 0.02h (~1.2 min)
-      if (Math.abs(storedHours - actualHours) > 0.02) {
+      // Check if stored hours produce a different HH:MM than exact elapsed minutes
+      const storedMinutes = Math.round(storedHours * 60);
+      if (storedMinutes !== elapsedMinutes || Math.abs(storedHours - actualHours) > 0.005) {
         const entry: CorrectionEntry = {
           id: String(record._id),
           employeeId: record.employeeId,
@@ -226,8 +240,8 @@ async function runAuditCorrection(applyFixes: boolean) {
           oldHours: storedHours,
           newHours: actualHours,
           oldOutDateTime: record.outDateTime || "unknown",
-          newOutDateTime: outDT.toISOString(), // OUT timestamp itself is correct; only hours updated
-          reason: `Manual OUT S${sessionIdx}: recalculated ${storedHours}h ? ${actualHours}h from actual IN/OUT timestamps`,
+          newOutDateTime: outDT.toISOString(),
+          reason: `Manual OUT S${sessionIdx}: exact minutes recalculated ${storedHours}h -> ${actualHours}h from actual IN/OUT timestamps`,
         };
         corrections.push(entry);
 
@@ -237,6 +251,7 @@ async function runAuditCorrection(applyFixes: boolean) {
             {
               $set: {
                 hours: actualHours,
+                outDateTime: outDT.toISOString(),
                 auditCorrectedAt: new Date().toISOString(),
                 auditCorrectionReason: entry.reason,
               },

@@ -223,7 +223,7 @@ export async function POST(req: Request) {
       date: todayStr,
       inDate: todayStr,
       inTime: timeStr,
-      inDateTime: now.toISOString(),
+      inDateTime: `${todayStr}T${timeStr}:00.000Z`,
       hours: 0,
       status: 'Open',
       attendanceType: finalAttendanceType,
@@ -249,8 +249,9 @@ export async function POST(req: Request) {
     const recordId = result.insertedId;
     const savedRecord = { ...newAttendanceRecord, id: String(recordId), _id: String(recordId) };
 
-    // Fast in-memory cache mutation
+    // Fast in-memory cache mutation & invalidation
     updateCachedCollection('attendance', 'INSERT', savedRecord);
+    invalidateBootstrapCache();
 
     // Run non-critical telemetry asynchronously
     if (typeof finalLat === 'number' && typeof finalLng === 'number') {

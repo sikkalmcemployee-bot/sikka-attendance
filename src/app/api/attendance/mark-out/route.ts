@@ -80,7 +80,7 @@ export async function POST(req: Request) {
           mobile === cleanSessionEmpId ||
           username === cleanSessionEmpId
         );
-      });
+      }) || null;
     }
 
     if (!matchedEmp) {
@@ -134,22 +134,20 @@ export async function POST(req: Request) {
     const now = getISTTime();
     const outTimeStr = format(now, "HH:mm");
     const outDateStr = format(now, "yyyy-MM-dd");
-    const outDT = parseDateTime(outDateStr, outTimeStr) || now;
+    let outDT = parseDateTime(outDateStr, outTimeStr) || now;
 
     // ── Working-Hour Calculation (Manual OUT) ──────────────────────────────
     // Rule: Manual OUT = actual OUT timestamp − actual IN timestamp.
-    // No per-session cap is applied here (caps apply only to Auto Mark OUT).
-    // The only hard ceiling is the 24-hour combined daily total.
+    // Resolution: Exact minute resolution matching inTime (HH:mm) and outTime (HH:mm).
+    const inDateStr = activeRecord.inDate || activeRecord.date || outDateStr;
+    const inTimeStr = activeRecord.inTime;
     let inDT: Date | null = null;
-    // Prefer the ISO inDateTime for maximum precision
-    if (activeRecord.inDateTime) {
-      try { inDT = parseISO(activeRecord.inDateTime); } catch {}
+    if (inDateStr && inTimeStr) {
+      inDT = parseDateTime(inDateStr, inTimeStr);
     }
     if (!inDT || !isValid(inDT)) {
-      if (activeRecord.inDate && activeRecord.inTime) {
-        inDT = parseDateTime(activeRecord.inDate, activeRecord.inTime);
-      } else if (activeRecord.date && activeRecord.inTime) {
-        inDT = parseDateTime(activeRecord.date, activeRecord.inTime);
+      if (activeRecord.inDateTime) {
+        try { inDT = parseISO(activeRecord.inDateTime); } catch {}
       }
     }
 
@@ -157,16 +155,26 @@ export async function POST(req: Request) {
 
     let finalHours = 0;
     if (inDT && isValid(inDT)) {
-      const diffMs = outDT.getTime() - inDT.getTime();
+      let diffMs = outDT.getTime() - inDT.getTime();
+      // Handle overnight shift crossing midnight if outDate is same or not incremented
       if (diffMs < 0) {
-        // OUT is before IN — this is impossible; reject the request
+        const nextDayOutDT = addHours(outDT, 24);
+        if (nextDayOutDT.getTime() - inDT.getTime() >= 0 && nextDayOutDT.getTime() - inDT.getTime() <= 24 * 3600 * 1000) {
+          outDT = nextDayOutDT;
+          diffMs = outDT.getTime() - inDT.getTime();
+        }
+      }
+
+      if (diffMs < 0) {
+        // OUT is before IN — reject the request
         return NextResponse.json(
           { success: false, message: "Mark OUT time cannot be earlier than Mark IN time. Please check the system clock." },
           { status: 400 }
         );
       }
-      // Store actual elapsed hours (no per-session cap — that is only for Auto OUT)
-      finalHours = diffMs / (1000 * 60 * 60);
+      // Store exact elapsed minutes divided by 60 for perfect HH:MM alignment
+      const elapsedMinutes = Math.max(0, Math.round(diffMs / 60000));
+      finalHours = elapsedMinutes / 60;
     }
 
     // Rule: Max 24 combined daily hours across all sessions
@@ -179,7 +187,7 @@ export async function POST(req: Request) {
     const otherHoursTotal = otherSessions.reduce((acc: number, s: any) => acc + (parseFloat(s.hours) || 0), 0);
     const maxAllowedRemaining = Math.max(0, 24 - otherHoursTotal);
     finalHours = Math.min(finalHours, maxAllowedRemaining);
-    finalHours = parseFloat(finalHours.toFixed(2));
+    finalHours = parseFloat(finalHours.toFixed(4));
 
     // 1-hour rest period / cool-off after Mark OUT
     const nextEnableDT = addHours(outDT, 1);
@@ -268,8 +276,9 @@ export async function POST(req: Request) {
       ? `${matchedEmp.firstName} ${matchedEmp.lastName || ''}`.trim()
       : (matchedEmp.name || matchedEmp.fullName || "Employee");
 
-    // Fast in-memory cache mutation
+    // Fast in-memory cache mutation & invalidation
     updateCachedCollection('attendance', 'UPDATE', savedRecord);
+    invalidateBootstrapCache();
 
     // Run non-critical telemetry asynchronously
     if (typeof finalLat === 'number' && typeof finalLng === 'number' && !isNaN(finalLat) && !isNaN(finalLng)) {

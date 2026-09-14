@@ -25,7 +25,7 @@ import {
   Filter,
   RefreshCw,
 } from "lucide-react";
-import { cn, formatDate, getWorkingHoursColor, formatHoursToHHMM, parseDateTime, isEmployeeActiveOnDate } from "@/lib/utils";
+import { cn, formatDate, getWorkingHoursColor, formatHoursToHHMM, parseDateTime, isEmployeeActiveOnDate, calculateWorkingHoursHHMM } from "@/lib/utils";
 import {
   Table,
   TableHeader,
@@ -333,6 +333,7 @@ export default function AttendancePage() {
     attendanceRecords = [],
     addRecord,
     updateRecord,
+    upsertAttendanceRecord,
     refreshData,
     plants = [],
     verifiedUser,
@@ -426,7 +427,7 @@ export default function AttendancePage() {
         if (sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)) {
           setDetectedPlant(sortedAllPlants[0].plant);
           // Instant address assignment: plant name + location (0ms, no network wait)
-          setDetectedAddress((prev) => prev || (sortedAllPlants[0].plant.name + (sortedAllPlants[0].plant.location ? ` (${sortedAllPlants[0].plant.location})` : "")));
+          setDetectedAddress((prev) => prev || (sortedAllPlants[0].plant.name + ((sortedAllPlants[0].plant as any).location ? ` (${(sortedAllPlants[0].plant as any).location})` : "")));
         } else {
           setDetectedPlant(null);
         }
@@ -1242,11 +1243,14 @@ export default function AttendancePage() {
       });
 
       if (response.ok) {
-        // MongoDB confirmed the save — update UI from fresh server data
+        // MongoDB confirmed the save — immediately update UI state and trigger background sync
+        const resData = await response.json().catch(() => ({}));
+        const savedRecord = resData?.data || { ...newRecordData, id: resData?.id || String(Date.now()), _id: resData?.id || String(Date.now()) };
+        upsertAttendanceRecord(savedRecord);
         setSelectedType("");
         setActiveDialog("NONE");
         toast({ title: `Mark IN Successful (Session ${nextSessionIndex} of 2)`, description: detectedPlant ? `Welcome back to ${plantName}` : `Logged as ${attendanceType}` });
-        await refreshData();
+        refreshData().catch(() => {});
       } else {
         // Always treat non-OK as a hard failure — never fall through to a local-only record.
         // MongoDB has not confirmed the save, so we must not show a success state.
@@ -1296,12 +1300,18 @@ export default function AttendancePage() {
     }
 
     const now = getISTTime();
-    const inDT = (activeRecord.inDate && activeRecord.inTime)
-      ? parseDateTime(activeRecord.inDate, activeRecord.inTime)
-      : (activeRecord.date && activeRecord.inTime)
-        ? parseDateTime(activeRecord.date, activeRecord.inTime)
-        : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
-    const outDT = parseDateTime(format(now, "yyyy-MM-dd"), format(now, "HH:mm")) || now;
+    const inDateStr = activeRecord.inDate || activeRecord.date;
+    const inTimeStr = activeRecord.inTime;
+    let inDT: Date | null = null;
+    if (inDateStr && inTimeStr) {
+      inDT = parseDateTime(inDateStr, inTimeStr);
+    }
+    if (!inDT || !isValid(inDT)) {
+      if (activeRecord.inDateTime) {
+        try { inDT = parseISO(activeRecord.inDateTime); } catch {}
+      }
+    }
+    let outDT = parseDateTime(format(now, "yyyy-MM-dd"), format(now, "HH:mm")) || now;
 
     if (!inDT || !isValid(inDT)) {
       toast({
@@ -1313,13 +1323,19 @@ export default function AttendancePage() {
     }
 
     const sessionIdx = activeRecord.sessionIndex || 1;
-    const maxSessionHours = sessionIdx === 2 ? 8 : 16;
 
     let finalHours = 0;
     if (isValid(inDT) && isValid(outDT)) {
-      const diffHours = (outDT.getTime() - inDT.getTime()) / (1000 * 60 * 60);
-      finalHours = Math.min(maxSessionHours, Math.max(0, diffHours));
-      finalHours = parseFloat(finalHours.toFixed(2));
+      let diffMs = outDT.getTime() - inDT.getTime();
+      if (diffMs < 0) {
+        const nextDayOutDT = addHours(outDT, 24);
+        if (nextDayOutDT.getTime() - inDT.getTime() >= 0) {
+          outDT = nextDayOutDT;
+          diffMs = outDT.getTime() - inDT.getTime();
+        }
+      }
+      const elapsedMinutes = Math.max(0, Math.round(diffMs / 60000));
+      finalHours = parseFloat((elapsedMinutes / 60).toFixed(4));
     }
 
     const nextEnableDT = addHours(outDT, 1);
@@ -1379,10 +1395,14 @@ export default function AttendancePage() {
       });
 
       if (response.ok) {
-        // MongoDB confirmed the save — update UI from fresh server data
+        // MongoDB confirmed the save — immediately update UI state and trigger background sync
+        const resData = await response.json().catch(() => ({}));
+        const savedRecord = resData?.data || { ...activeRecord, ...outPayload };
+        upsertAttendanceRecord(savedRecord);
         setActiveDialog("NONE");
-        toast({ title: `Mark OUT Successful (Session ${sessionIdx})`, description: `Shift completed. Hours: ${formatHoursToHHMM(finalHours)}` });
-        await refreshData();
+        const displayHHMM = calculateWorkingHoursHHMM(savedRecord.inDate || savedRecord.date, savedRecord.inTime, savedRecord.outDate || savedRecord.date, savedRecord.outTime, savedRecord.hours || finalHours);
+        toast({ title: `Mark OUT Successful (Session ${sessionIdx})`, description: `Shift completed. Hours: ${displayHHMM}` });
+        refreshData().catch(() => {});
       } else {
         // Always treat non-OK as a hard failure — never fall through to a local-only update.
         // MongoDB has not confirmed the save, so we must not show a success state.
@@ -1512,7 +1532,7 @@ export default function AttendancePage() {
           setNearestPlantInfo(sortedAllPlants[0]);
           if (sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)) {
             setDetectedPlant(sortedAllPlants[0].plant);
-            defaultPlantAddr = sortedAllPlants[0].plant.name + (sortedAllPlants[0].plant.location ? ` (${sortedAllPlants[0].plant.location})` : "");
+            defaultPlantAddr = sortedAllPlants[0].plant.name + (((sortedAllPlants[0].plant as any).location) ? ` (${(sortedAllPlants[0].plant as any).location})` : "");
             // Instantly fill detectedAddress so confirmation button is immediately active!
             setDetectedAddress((prev) => prev || defaultPlantAddr);
           } else {
@@ -2092,7 +2112,7 @@ export default function AttendancePage() {
                           </TableCell>
                           <TableCell>
                             <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
-                              {formatHoursToHHMM(r.hours || 0)}
+                              {calculateWorkingHoursHHMM(r.inDate || r.date, r.inTime, r.outDate || r.date, r.outTime, r.hours)}
                             </Badge>
                           </TableCell>
                           <TableCell className="hidden lg:table-cell text-[10px] font-medium text-slate-500 max-w-[140px] truncate" title={r.remark}>
@@ -2415,7 +2435,7 @@ export default function AttendancePage() {
                           </TableCell>
                           <TableCell>
                             <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
-                              {formatHoursToHHMM(r.hours || 0)}
+                              {calculateWorkingHoursHHMM(r.inDate || r.date, r.inTime, r.outDate || r.date, r.outTime, r.hours)}
                             </Badge>
                           </TableCell>
                           <TableCell className="hidden lg:table-cell text-[10px] font-medium text-slate-500 max-w-[130px] truncate" title={r.remark}>

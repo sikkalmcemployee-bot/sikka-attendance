@@ -31,6 +31,7 @@ interface DataContextType {
   deleteRecord: (col: string, id: string, skipRefresh?: boolean) => Promise<void>;
   setRecord: (col: string, id: string, data: any, skipRefresh?: boolean) => Promise<void>;
   clearAllNotifications: (empId?: string, isGlobal?: boolean) => Promise<void>;
+  upsertAttendanceRecord: (record: AttendanceRecord) => void;
   currentUser: any;
   verifiedUser: any;
   isLoading: boolean;
@@ -113,7 +114,6 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
             if (Array.isArray(cached.plants) && cached.plants.length > 0) setPlants(cached.plants);
             if (Array.isArray(cached.holidays) && cached.holidays.length > 0) setHolidays(cached.holidays);
             if (Array.isArray(cached.leaveRequests) && cached.leaveRequests.length > 0) setLeaveRequests(cached.leaveRequests);
-            if (Array.isArray(cached.notifications)) setNotifications(cached.notifications);
             if (Array.isArray(cached.firms) && cached.firms.length > 0) setFirms(cached.firms);
             if (Array.isArray(cached.users) && cached.users.length > 0) setUsers(cached.users);
             setIsLoading(false);
@@ -360,12 +360,55 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     return currentUser;
   }, [currentUser, employees, users]);
 
+  const upsertAttendanceRecord = useCallback((record: AttendanceRecord) => {
+    if (!record) return;
+    const recordId = String(record.id || (record as any)._id || '');
+    const recEmpId = String(record.employeeId || '').toUpperCase();
+    const recDate = String(record.date || '');
+    const recSession = record.sessionIndex || (record as any).sessionNumber || 1;
+
+    setAttendanceRecords(prev => {
+      let found = false;
+      const updated = prev.map(r => {
+        const rId = String(r.id || (r as any)._id || '');
+        const rEmpId = String(r.employeeId || '').toUpperCase();
+        const rDate = String(r.date || '');
+        const rSession = r.sessionIndex || (r as any).sessionNumber || 1;
+
+        if ((recordId && rId === recordId) || (recEmpId && recDate && rEmpId === recEmpId && rDate === recDate && rSession === recSession)) {
+          found = true;
+          return { ...r, ...record };
+        }
+        return r;
+      });
+
+      const next = found ? updated : [record, ...prev];
+
+      // Update local bundle cache synchronously for instant 0ms offline/hydration
+      if (typeof window !== 'undefined') {
+        try {
+          const raw = localStorage.getItem('sikka_data_bundle');
+          if (raw) {
+            const cached = JSON.parse(raw);
+            if (cached && typeof cached === 'object') {
+              cached.attendance = next;
+              localStorage.setItem('sikka_data_bundle', JSON.stringify(cached));
+            }
+          }
+        } catch {}
+      }
+
+      return next;
+    });
+  }, []);
+
   const addRecord = async (col: string, data: any, skipRefresh = false) => {
     const newRecord = { ...data, createdAt: data.createdAt || new Date().toISOString() };
 
     // Instant optimistic UI update
     if (col === 'attendance') {
-      setAttendanceRecords(prev => [newRecord, ...prev.filter(r => !(r.employeeId === data.employeeId && r.date === data.date))]);
+      const sessIdx = data.sessionIndex || data.sessionNumber || 1;
+      setAttendanceRecords(prev => [newRecord, ...prev.filter(r => !(r.employeeId === data.employeeId && r.date === data.date && (r.sessionIndex || (r as any).sessionNumber || 1) === sessIdx))]);
     } else if (col === 'leaveRequests') {
       setLeaveRequests(prev => [newRecord, ...prev]);
     } else if (col === 'employees') {
@@ -395,9 +438,11 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     // Instant optimistic UI update
     if (col === 'attendance') {
+      const sessIdx = data.sessionIndex || data.sessionNumber || 1;
       setAttendanceRecords(prev => prev.map(r => {
         const rId = String(r.id || (r as any)._id || '');
-        if (rId === String(id) || (data.employeeId && data.date && r.employeeId === data.employeeId && r.date === data.date)) {
+        const rSess = r.sessionIndex || (r as any).sessionNumber || 1;
+        if (rId === String(id) || (data.employeeId && data.date && r.employeeId === data.employeeId && r.date === data.date && rSess === sessIdx)) {
           return { ...r, ...payload };
         }
         return r;
@@ -491,11 +536,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     deleteRecord,
     setRecord,
     clearAllNotifications,
+    upsertAttendanceRecord,
     currentUser,
     verifiedUser,
     isLoading,
-    refreshData: fetchData
-  }), [employees, attendanceRecords, vouchers, payrollRecords, plants, firms, users, holidays, notifications, leaveRequests, currentUser, verifiedUser, isLoading, fetchData]);
+    refreshData: () => fetchData(true)
+  }), [employees, attendanceRecords, vouchers, payrollRecords, plants, firms, users, holidays, notifications, leaveRequests, currentUser, verifiedUser, isLoading, fetchData, upsertAttendanceRecord]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

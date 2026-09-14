@@ -190,6 +190,37 @@ export function parseDateTime(dateStr: string, timeStr: string): Date | null {
 }
 
 /**
+ * Calculates exact elapsed working hours (HH:MM) between In date/time and Out date/time.
+ * Guarantees that Out Time minus In Time always matches displayed Work Hour to the exact minute.
+ */
+export function calculateWorkingHoursHHMM(
+  inDate: string | undefined | null,
+  inTime: string | undefined | null,
+  outDate: string | undefined | null,
+  outTime: string | undefined | null,
+  storedHours?: number | null
+): string {
+  if (inTime && outTime) {
+    const inDT = parseDateTime(inDate || '', inTime);
+    let outDT = parseDateTime(outDate || inDate || '', outTime);
+    if (inDT && outDT) {
+      let diffMs = outDT.getTime() - inDT.getTime();
+      if (diffMs < 0 && (!outDate || outDate === inDate)) {
+        outDT = new Date(outDT.getTime() + 24 * 3600 * 1000);
+        diffMs = outDT.getTime() - inDT.getTime();
+      }
+      if (diffMs >= 0) {
+        const totalMinutes = Math.round(diffMs / 60000);
+        const h = Math.floor(totalMinutes / 60);
+        const m = totalMinutes % 60;
+        return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+      }
+    }
+  }
+  return formatHoursToHHMM(storedHours);
+}
+
+/**
  * Helper to determine if an employee was active on a specific date.
  */
 export function isEmployeeActiveOnDate(emp: any, dateStr: string) {

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/mongodb';
 import { format, parseISO, addHours, isValid } from 'date-fns';
-import { invalidateBootstrapCache } from '@/lib/data-cache';
+import { invalidateBootstrapCache, updateCachedCollection } from '@/lib/data-cache';
 import { parseDateTime } from '@/lib/utils';
 import { realtimeBroadcaster } from '@/lib/realtime-events';
 
@@ -117,12 +117,15 @@ async function processAutoMarkOut() {
           { $set: updatePayload }
         );
 
+        const autoOutSavedRecord = { ...record, ...updatePayload, id: String(record._id) };
+        updateCachedCollection('attendance', 'UPDATE', autoOutSavedRecord);
+
         // Broadcast real-time event AFTER confirmed MongoDB save
         //    Each auto-out record gets its own push so clients refresh immediately
         realtimeBroadcaster.broadcast('attendance_updated', {
           collection: 'attendance',
           action: 'auto_out',
-          data: { ...record, ...updatePayload, id: String(record._id) },
+          data: autoOutSavedRecord,
         });
 
         processedRecords.push({

@@ -84,21 +84,29 @@ export function updateCachedCollection(collectionName: string, action: 'INSERT' 
       const itemId = String(item?._id || item?.id || '');
 
       if (action === 'INSERT' && item) {
+        const itemSess = item.sessionIndex || item.sessionNumber || 1;
         const filtered = list.filter((x: any) => {
           const xId = String(x._id || x.id || '');
           if (itemId && xId === itemId) return false;
-          if (colKey === 'attendance' && item.employeeId && item.date && x.employeeId === item.employeeId && x.date === item.date) return false;
+          if (colKey === 'attendance' && item.employeeId && item.date && x.employeeId === item.employeeId && x.date === item.date) {
+            const xSess = x.sessionIndex || x.sessionNumber || 1;
+            if (xSess === itemSess) return false;
+          }
           return true;
         });
         data[colKey] = [item, ...filtered];
       } else if (action === 'UPDATE' && item) {
+        const itemSess = item.sessionIndex || item.sessionNumber || 1;
         data[colKey] = list.map((x: any) => {
           const xId = String(x._id || x.id || '');
           if (itemId && xId === itemId) {
             return { ...x, ...item };
           }
           if (colKey === 'attendance' && item.employeeId && item.date && x.employeeId === item.employeeId && x.date === item.date) {
-            return { ...x, ...item };
+            const xSess = x.sessionIndex || x.sessionNumber || 1;
+            if (xSess === itemSess) {
+              return { ...x, ...item };
+            }
           }
           return x;
         });
@@ -113,8 +121,14 @@ export function updateCachedCollection(collectionName: string, action: 'INSERT' 
   });
 }
 
-export function invalidateBootstrapCache() {
-  // Soft touch: we do NOT clear the cache completely so users never experience 50s cold freezes.
+export function invalidateBootstrapCache(cacheKey?: string) {
+  const cacheMap = getCacheMap();
+  if (cacheKey) {
+    cacheMap.delete(cacheKey);
+  } else {
+    // Invalidate all cached bootstrap payloads
+    cacheMap.clear();
+  }
 }
 
 export function getInFlightPromise(): Promise<any> | null {
