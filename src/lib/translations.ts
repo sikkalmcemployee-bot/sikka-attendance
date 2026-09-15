@@ -65,8 +65,10 @@ export interface Translations {
   currentAndPreviousMonths: string;
   month: string;
   present: string;
+  leave: string;
   absent: string;
   worked: string;
+  rank: string;
 
   // Leave Form & History
   applyForLeave: string;
@@ -194,8 +196,10 @@ export const translations: Record<Language, Translations> = {
     currentAndPreviousMonths: "Current & Previous 2 Months",
     month: "Month",
     present: "Present",
+    leave: "Leave",
     absent: "Absent",
     worked: "Worked",
+    rank: "Rank",
 
     applyForLeave: "Apply for Leave",
     submitLeaveDesc: "Submit a new leave application for managerial review.",
@@ -316,8 +320,10 @@ export const translations: Record<Language, Translations> = {
     currentAndPreviousMonths: "वर्तमान और पिछले 2 महीने",
     month: "महीना",
     present: "उपस्थित",
+    leave: "छुट्टी",
     absent: "अनुपस्थित",
     worked: "कार्य किया",
+    rank: "रैंक",
 
     applyForLeave: "छुट्टी के लिए आवेदन करें",
     submitLeaveDesc: "प्रबंधकीय समीक्षा के लिए एक नया अवकाश आवेदन जमा करें।",

@@ -3,33 +3,33 @@
 import { useEffect, useState, useMemo, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Image from "next/image";
-import { 
-  SidebarProvider, 
-  Sidebar, 
-  SidebarContent, 
-  SidebarHeader, 
-  SidebarMenu, 
-  SidebarMenuItem, 
-  SidebarMenuButton, 
+import {
+  SidebarProvider,
+  Sidebar,
+  SidebarContent,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuItem,
+  SidebarMenuButton,
   SidebarTrigger,
   SidebarInset,
   SidebarFooter
 } from "@/components/ui/sidebar";
-import { 
-  LayoutDashboard, 
-  UserCheck, 
-  Users as UsersIcon, 
-  Calendar, 
-  FileText, 
-  Settings, 
-  LogOut, 
-  Factory, 
-  BarChart3, 
-  Clock, 
-  User as UserIcon, 
-  Camera, 
-  ShieldAlert, 
-  ArrowLeft, 
+import {
+  LayoutDashboard,
+  UserCheck,
+  Users as UsersIcon,
+  Calendar,
+  FileText,
+  Settings,
+  LogOut,
+  Factory,
+  BarChart3,
+  Clock,
+  User as UserIcon,
+  Camera,
+  ShieldAlert,
+  ArrowLeft,
   Smartphone,
   Globe
 } from "lucide-react";
@@ -60,7 +60,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { 
+import {
   TooltipProvider,
 } from "@/components/ui/tooltip";
 import { Label } from "@/components/ui/label";
@@ -119,10 +119,10 @@ function HeaderActions() {
         </DropdownMenuContent>
       </DropdownMenu>
 
-      <ProfileSettingsDialog 
-        isOpen={isSettingsOpen} 
-        onOpenChange={setIsSettingsOpen} 
-        user={verifiedUser} 
+      <ProfileSettingsDialog
+        isOpen={isSettingsOpen}
+        onOpenChange={setIsSettingsOpen}
+        user={verifiedUser}
         onSave={handleSaveProfile}
       />
     </div>
@@ -186,13 +186,13 @@ function ProfileSettingsDialog({ isOpen, onOpenChange, user, onSave }: { isOpen:
       }
 
       const updatedUser = { ...user, fullName: name, avatar, language };
-      
+
       // Persist in localStorage and session cookie
       if (typeof window !== 'undefined') {
         try {
           localStorage.setItem('user', JSON.stringify(updatedUser));
           Cookies.set('sikka_session', JSON.stringify(updatedUser), { expires: 365, path: '/' });
-        } catch {}
+        } catch { }
       }
 
       onSave(updatedUser);
@@ -223,9 +223,9 @@ function ProfileSettingsDialog({ isOpen, onOpenChange, user, onSave }: { isOpen:
                 <AvatarImage src={avatar || `https://picsum.photos/seed/${user.username}/96/96`} />
                 <AvatarFallback className="text-2xl font-black bg-slate-100">{name?.[0]}</AvatarFallback>
               </Avatar>
-              <Button 
-                size="icon" 
-                variant="secondary" 
+              <Button
+                size="icon"
+                variant="secondary"
                 className="absolute bottom-0 right-0 h-8 w-8 rounded-full shadow-lg border-2 border-white bg-primary text-white hover:bg-primary/90"
                 onClick={() => fileInputRef.current?.click()}
                 disabled={isProcessing}
@@ -240,9 +240,9 @@ function ProfileSettingsDialog({ isOpen, onOpenChange, user, onSave }: { isOpen:
           <div className="space-y-4">
             <div className="space-y-2">
               <Label className="font-bold text-xs uppercase text-slate-500 tracking-wider">Full Name</Label>
-              <Input 
-                value={name} 
-                onChange={(e) => setName(e.target.value)} 
+              <Input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
                 className="h-12 bg-slate-50 border-slate-200 rounded-xl font-bold"
                 placeholder="Enter your name"
                 disabled={user.role === 'EMPLOYEE' || isProcessing}
@@ -328,7 +328,7 @@ function SidebarNav() {
         <SidebarMenu>
           {filteredMenu.map((item) => (
             <SidebarMenuItem key={item.path}>
-              <SidebarMenuButton 
+              <SidebarMenuButton
                 isActive={pathname === item.path}
                 onClick={() => router.push(item.path)}
                 tooltip={item.name}
@@ -401,9 +401,9 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
               gpsLatitude,
               gpsLongitude,
             }),
-          }).catch(() => {});
+          }).catch(() => { });
         },
-        () => {},
+        () => { },
         { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
       );
     };
@@ -425,9 +425,9 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
             gpsLatitude,
             gpsLongitude,
           }),
-        }).catch(() => {});
+        }).catch(() => { });
       },
-      () => {},
+      () => { },
       { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
     );
 
@@ -501,7 +501,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
               Loading Portal...
             </p>
             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              Sikka Enterprises & Logistics
+              Sikka Industries & Logistics
             </p>
           </div>
         </div>
@@ -521,7 +521,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
         <p className="text-slate-500 font-medium text-center max-w-sm mb-8">
           You do not have the required permissions to view this administrative module.
         </p>
-        <Button 
+        <Button
           className="bg-primary px-8 h-12 rounded-xl font-bold shadow-lg shadow-primary/20 gap-2"
           onClick={() => {
             const firstAllowed = APP_MODULES.find(m => checkUserModuleAccess(verifiedUser, m.id));
@@ -554,11 +554,11 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
                 </p>
               </div>
             </div>
-            
+
             <HeaderActions />
           </header>
 
-          <main 
+          <main
             className="flex-1 p-2 sm:p-4 overflow-y-auto bg-slate-50/50 outline-none"
             tabIndex={0}
             role="main"
@@ -567,7 +567,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
               {children}
             </div>
           </main>
-          
+
           <footer className="py-4 border-t border-slate-100 flex items-center justify-center px-4 bg-white text-[10px] font-black uppercase tracking-widest text-slate-400 shrink-0 text-center">
             © Sikka Industries & Logistics – Version 1.0
           </footer>
@@ -592,11 +592,11 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
                 {pathname.split("/").pop()?.replace(/-/g, " ") || "Overview"}
               </h2>
             </div>
-            
+
             <HeaderActions />
           </header>
 
-          <main 
+          <main
             className="flex-1 p-6 overflow-y-auto bg-slate-50/50 outline-none focus-visible:ring-1 focus-visible:ring-primary/10"
             tabIndex={0}
             role="main"
@@ -605,7 +605,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
               {children}
             </div>
           </main>
-          
+
           <footer className="h-12 border-t border-slate-100 flex items-center justify-center px-6 bg-white text-[10px] font-black uppercase tracking-widest text-slate-400 shrink-0">
             © Sikka Industries & Logistics – Version 1.0
           </footer>

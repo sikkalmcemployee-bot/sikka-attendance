@@ -1,8 +1,9 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/mongodb';
 import { getSessionUser, isEmployeeRole } from '@/lib/auth/session';
-import { format } from 'date-fns';
+import { format, parseISO, addHours, isValid } from 'date-fns';
 import { invalidateBootstrapCache, updateCachedCollection } from '@/lib/data-cache';
+import { parseDateTime } from '@/lib/utils';
 import { realtimeBroadcaster } from '@/lib/realtime-events';
 
 export const dynamic = 'force-dynamic';
@@ -116,27 +117,84 @@ export async function POST(req: Request) {
     const todayStr = format(now, "yyyy-MM-dd");
     const timeStr = format(now, "HH:mm");
 
-    // 4. Check today's existing attendance sessions (Max 2 sessions per day)
     const empIdMatches = [internalEmpId, matchedEmp.employeeId, matchedEmp.id, cleanSessionEmpId].filter(Boolean);
+
+    // 4. Check for any existing active Open shift (across all dates)
+    const anyOpenShift = await attendanceCol.findOne({
+      employeeId: { $in: empIdMatches },
+      status: 'Open'
+    });
+
+    if (anyOpenShift) {
+      let openInDT: Date | null = null;
+      if (anyOpenShift.inDate && anyOpenShift.inTime) {
+        openInDT = parseDateTime(anyOpenShift.inDate, anyOpenShift.inTime);
+      } else if (anyOpenShift.date && anyOpenShift.inTime) {
+        openInDT = parseDateTime(anyOpenShift.date, anyOpenShift.inTime);
+      } else if (anyOpenShift.inDateTime) {
+        try { openInDT = parseISO(anyOpenShift.inDateTime); } catch {}
+      }
+
+      const openSessionIdx = anyOpenShift.sessionIndex || 1;
+      const thresholdHours = openSessionIdx === 2 ? 8 : 16;
+      const creditedHours = openSessionIdx === 2 ? 4.0 : 8.0;
+
+      if (openInDT && isValid(openInDT)) {
+        const elapsedHours = (now.getTime() - openInDT.getTime()) / (1000 * 60 * 60);
+        if (elapsedHours >= thresholdHours) {
+          // Auto-close expired shift with credited hours (+8h for S1, +4h for S2)
+          const creditOutDT = addHours(openInDT, creditedHours);
+          const autoOutPayload: any = {
+            outTime: format(creditOutDT, "HH:mm"),
+            outDate: format(creditOutDT, "yyyy-MM-dd"),
+            outDateTime: creditOutDT.toISOString(),
+            hours: creditedHours,
+            status: 'Auto OUT',
+            outType: 'Auto',
+            autoOut: true,
+            autoCheckout: true,
+            autoTriggerTime: now.toISOString(),
+            nextInEnableTime: now.toISOString(), // Immediate eligibility per requirement 5
+            currentGeofenceStatus: "Shift Closed",
+            remark: `System Auto-Logged OUT (${thresholdHours}h Limit reached for Session ${openSessionIdx}); Credited ${creditedHours}h fixed working time.`,
+            updatedAt: now.toISOString(),
+          };
+          await attendanceCol.updateOne({ _id: anyOpenShift._id }, { $set: autoOutPayload });
+          const autoOutRecord = { ...anyOpenShift, ...autoOutPayload, id: String(anyOpenShift._id) };
+          updateCachedCollection('attendance', 'UPDATE', autoOutRecord);
+          realtimeBroadcaster.broadcast('attendance_updated', {
+            collection: 'attendance',
+            action: 'auto_out',
+            data: autoOutRecord,
+          });
+        } else {
+          return NextResponse.json(
+            {
+              success: false,
+              message: "You already have an active Mark IN shift. Please Mark OUT first.",
+              data: anyOpenShift
+            },
+            { status: 400 }
+          );
+        }
+      } else {
+        return NextResponse.json(
+          {
+            success: false,
+            message: "You already have an active Mark IN shift. Please Mark OUT first.",
+            data: anyOpenShift
+          },
+          { status: 400 }
+        );
+      }
+    }
+
+    // 5. Check today's existing attendance sessions (Max 2 sessions per day)
     const todaySessions = await attendanceCol.find({
       employeeId: { $in: empIdMatches },
       date: todayStr
     }).sort({ createdAt: 1 }).toArray();
 
-    // 4a. Check if already marked IN with an active Open shift
-    const openSession = todaySessions.find((s: any) => s.status === 'Open');
-    if (openSession) {
-      return NextResponse.json(
-        {
-          success: false,
-          message: "You already have an active Mark IN shift for today.",
-          data: openSession
-        },
-        { status: 400 }
-      );
-    }
-
-    // 4b. Rule 6: No Third Mark IN (Max 2 attendance sessions per day)
     if (todaySessions.length >= 2) {
       return NextResponse.json(
         {
@@ -145,6 +203,52 @@ export async function POST(req: Request) {
         },
         { status: 400 }
       );
+    }
+
+    // 6. If Session 1 completed, validate the 2-minute waiting period
+    if (todaySessions.length === 1) {
+      const s1 = todaySessions[0];
+      const isAutoOut = s1.autoOut || s1.outType === 'Auto';
+      // Only manual Mark OUT has a 2-minute waiting period. Auto OUT after 16 hours allows immediate Mark IN (Requirement 5).
+      if (!isAutoOut) {
+        let s1OutDT: Date | null = null;
+        if (s1.outDateTime) {
+          try { s1OutDT = parseISO(s1.outDateTime); } catch {}
+        }
+        if (!s1OutDT || !isValid(s1OutDT)) {
+          if (s1.outDate && s1.outTime) {
+            s1OutDT = parseDateTime(s1.outDate, s1.outTime);
+          }
+        }
+        if (s1OutDT && isValid(s1OutDT)) {
+          const enableTimeMs = s1OutDT.getTime() + (2 * 60 * 1000); // exactly 2 minutes
+          if (now.getTime() < enableTimeMs) {
+            const remainingSec = Math.ceil((enableTimeMs - now.getTime()) / 1000);
+            return NextResponse.json(
+              {
+                success: false,
+                message: `Please wait for the 2-minute rest period to complete. Remaining time: ${remainingSec}s.`
+              },
+              { status: 400 }
+            );
+          }
+        }
+      }
+    }
+
+    // 7. Duplicate request protection (prevent double-taps within 5 seconds)
+    const recentRecord = await attendanceCol.findOne(
+      { employeeId: { $in: empIdMatches } },
+      { sort: { createdAt: -1 } }
+    );
+    if (recentRecord && recentRecord.createdAt) {
+      const recentTime = new Date(recentRecord.createdAt).getTime();
+      if (now.getTime() - recentTime < 5000) {
+        return NextResponse.json(
+          { success: false, message: "A request was just processed. Please avoid duplicate submissions." },
+          { status: 429 }
+        );
+      }
     }
 
     const sessionIndex = todaySessions.length + 1; // 1 for first session, 2 for second session

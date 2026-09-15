@@ -24,6 +24,8 @@ import {
   User,
   Filter,
   RefreshCw,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 import { cn, formatDate, getWorkingHoursColor, formatHoursToHHMM, parseDateTime, isEmployeeActiveOnDate, calculateWorkingHoursHHMM } from "@/lib/utils";
 import {
@@ -40,6 +42,7 @@ import {
   format,
   parseISO,
   addHours,
+  addMinutes,
   isAfter,
   isValid,
   startOfMonth,
@@ -144,6 +147,18 @@ const getPreciseDistance = (lat1: number, lon1: number, lat2: number, lon2: numb
     Math.sin(dLon / 2);
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
+};
+
+// Ordinal suffix helper: 1 -> "1st", 2 -> "2nd", 3 -> "3rd", 4 -> "4th", 11 -> "11th", 21 -> "21st"
+const toOrdinal = (n: number): string => {
+  const abs = Math.abs(n);
+  const mod100 = abs % 100;
+  const mod10 = abs % 10;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  if (mod10 === 1) return `${n}st`;
+  if (mod10 === 2) return `${n}nd`;
+  if (mod10 === 3) return `${n}rd`;
+  return `${n}th`;
 };
 
 // --- LEAVE REQUEST FORM COMPONENT (FOR EMPLOYEES) ---
@@ -361,6 +376,52 @@ export default function AttendancePage() {
   const [currentTime, setCurrentTime] = useState<Date | null>(null);
   const [isMounted, setIsMounted] = useState(false);
   const [cooldownRemaining, setCooldownRemaining] = useState<string>("");
+  const [isOnline, setIsOnline] = useState<boolean>(() => {
+    return typeof navigator !== 'undefined' ? navigator.onLine : true;
+  });
+
+  // Monthly competition ranks fetched server-side (keyed by monthKey e.g. "2026-09")
+  const [monthlyRanks, setMonthlyRanks] = useState<Record<string, number>>({});
+
+  // Internet Connectivity & Auto-Refresh / Status Synchronization (Requirements 1 & 12)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleOnline = () => {
+      setIsOnline(true);
+      refreshData().catch(() => {});
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    setIsOnline(navigator.onLine);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        setCurrentTime(getISTTime());
+        setIsOnline(navigator.onLine);
+        refreshData().catch(() => {});
+      }
+    };
+    const handleWindowFocus = () => {
+      setCurrentTime(getISTTime());
+      setIsOnline(navigator.onLine);
+      refreshData().catch(() => {});
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', handleWindowFocus);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, [refreshData]);
 
   const [isLoadingLocation, setIsLoadingLocation] = useState(false);
   const [activeDialog, setActiveDialog] = useState<"NONE" | "IN" | "OUT">("NONE");
@@ -658,8 +719,64 @@ export default function AttendancePage() {
 
       if (recordsByDate.has(dateStr)) {
         const dayRecords = recordsByDate.get(dateStr)!;
-        dayRecords.sort((a, b) => (b.inTime || "").localeCompare(a.inTime || ""));
-        fullHistory.push(...dayRecords);
+        if (dayRecords.length >= 2) {
+          dayRecords.sort((a, b) => (a.sessionIndex || 1) - (b.sessionIndex || 1) || (a.inTime || "").localeCompare(b.inTime || ""));
+          const s1 = dayRecords[0];
+          const s2 = dayRecords[1];
+
+          const s1HoursHHMM = calculateWorkingHoursHHMM(s1.inDate || s1.date, s1.inTime, s1.outDate || s1.date, s1.outTime, s1.hours);
+          const s2HoursHHMM = calculateWorkingHoursHHMM(s2.inDate || s2.date, s2.inTime, s2.outDate || s2.date, s2.outTime, s2.hours);
+          const totalDecimalHours = parseFloat(((parseFloat(s1.hours) || 0) + (parseFloat(s2.hours) || 0)).toFixed(4));
+          const totalHoursHHMM = formatHoursToHHMM(totalDecimalHours);
+
+          const s1Plant = s1.inPlant && s1.inPlant !== "N/A" ? s1.inPlant : (s1.attendanceType === 'WFH' ? t.workFromHome : s1.attendanceType === 'FIELD' ? t.fieldWork : (s1.attendanceType || "Plant"));
+          const s2Plant = s2.inPlant && s2.inPlant !== "N/A" ? s2.inPlant : (s2.attendanceType === 'WFH' ? t.workFromHome : s2.attendanceType === 'FIELD' ? t.fieldWork : (s2.attendanceType || "Plant"));
+
+          const s1InTime = s1.inTime ? formatToReadableISTTime(s1.inTime) : "--:--";
+          const s2InTime = s2.inTime ? formatToReadableISTTime(s2.inTime) : "--:--";
+          const s1OutTime = s1.outTime ? formatToReadableISTTime(s1.outTime) : "--:--";
+          const s2OutTime = s2.outTime ? formatToReadableISTTime(s2.outTime) : "--:--";
+
+          const s1InLoc = s1.address || "N/A";
+          const s2InLoc = s2.address || "N/A";
+          const s1OutLoc = s1.addressOut || "N/A";
+          const s2OutLoc = s2.addressOut || "N/A";
+
+          const consolidatedRecord = {
+            id: `${s1.id || s1._id}_${s2.id || s2._id}`,
+            isMultiSession: true,
+            date: dateStr,
+            employeeName: s1.employeeName || effectiveEmployeeName,
+            session1: s1,
+            session2: s2,
+            s1Plant,
+            s2Plant,
+            s1InTime,
+            s2InTime,
+            s1OutTime,
+            s2OutTime,
+            s1InLoc,
+            s2InLoc,
+            s1OutLoc,
+            s2OutLoc,
+            s1HoursHHMM,
+            s2HoursHHMM,
+            totalHoursHHMM,
+            inPlant: s1Plant === s2Plant ? s1Plant : `${s1Plant} | ${s2Plant}`,
+            inTime: `${s1InTime} | ${s2InTime}`,
+            outTime: `${s1OutTime} | ${s2OutTime}`,
+            address: `${s1InLoc} | ${s2InLoc}`,
+            addressOut: `${s1OutLoc} | ${s2OutLoc}`,
+            hours: totalDecimalHours,
+            status: (s1.status === 'Open' || s2.status === 'Open') ? 'Open' :
+                    (s1.status === 'Auto OUT' || s2.status === 'Auto OUT') ? 'Auto OUT' :
+                    (s1.status === 'Closed' && s2.status === 'Closed') ? 'Closed' : s1.status,
+            remark: s1.remark && s2.remark && s1.remark !== s2.remark ? `${s1.remark} | ${s2.remark}` : (s1.remark || s2.remark || "Completed"),
+          };
+          fullHistory.push(consolidatedRecord);
+        } else {
+          fullHistory.push(...dayRecords);
+        }
       } else {
         const isSun = isSunday(currentD);
         const holidayObj = holidays.find((h: any) => h.date === dateStr);
@@ -744,39 +861,28 @@ export default function AttendancePage() {
       return myIdentitySet.has(recEmpId) || (recEmpName && myIdentitySet.has(recEmpName));
     });
 
-    const punchesByDate = new Map<string, any>();
+    const punchesByDate = new Map<string, any[]>();
     myPunches.forEach((r: any) => {
-      if (r.date) punchesByDate.set(r.date, r);
+      if (r.date) {
+        const list = punchesByDate.get(r.date) || [];
+        list.push(r);
+        punchesByDate.set(r.date, list);
+      }
     });
 
-    // Status calculation identical to Page Approvals Active Tab
-    const getApprovalsCalculatedStatus = (dateStr: string, record: any) => {
-      const isSun = isSunday(parseISO(dateStr));
-      const customHoliday = (holidays || []).find((h: any) => h.date === dateStr && !h.auto);
-      const approvedLeave = approvedLeavesMap.get(dateStr);
 
-      if (record && record.inTime) {
-        if (isSun) return "Present on Weekly Off";
-        if (customHoliday) return "Present on Holiday";
-        return "Present";
-      }
 
-      if (approvedLeave) return "Absent On Leave";
-      if (isSun) return "Weekly Off";
-      if (customHoliday) return "Holiday";
-
-      return "Absent";
-    };
 
     const result = [];
     for (let i = 0; i < 3; i++) {
       const mDate = subMonths(now, i);
       const mKey = format(mDate, "yyyy-MM");
-      const monthYearLabel = format(mDate, "MMM-yyyy");
+      const monthYearLabel = format(mDate, "MMMM yyyy");
       const start = startOfMonth(mDate);
       const end = isSameMonth(mDate, now) ? now : endOfMonth(mDate);
 
       let totalPresent = 0;
+      let totalLeave = 0;
       let totalAbsent = 0;
       let totalMinutes = 0;
 
@@ -792,14 +898,18 @@ export default function AttendancePage() {
           continue;
         }
 
-        const punchRec = punchesByDate.get(dStr);
-        const status = getApprovalsCalculatedStatus(dStr, punchRec);
+        const dayPunches = punchesByDate.get(dStr) || [];
+        const hasAttendance = dayPunches.some((p: any) => p && p.inTime);
+        const approvedLeave = approvedLeavesMap.get(dStr);
+        const isSun = isSunday(parseISO(dStr));
+        const customHoliday = (holidays || []).find((h: any) => h.date === dStr && !h.auto);
 
-        if (status === "Present" || status === "Present on Weekly Off" || status === "Present on Holiday") {
+        // Priority 1: Valid attendance -> Present (summing Session 1 + Session 2)
+        if (hasAttendance) {
           totalPresent++;
-          if (punchRec) {
+          for (const punchRec of dayPunches) {
             let hours = typeof punchRec.hours === "number" ? punchRec.hours : 0;
-            // Auto checkout rule if unclosed shift and >16h
+            // Auto checkout rule if unclosed shift
             if (!punchRec.outTime && punchRec.inTime) {
               const inDT = (punchRec.inDate && punchRec.inTime)
                 ? parseDateTime(punchRec.inDate, punchRec.inTime)
@@ -808,12 +918,21 @@ export default function AttendancePage() {
                   : (punchRec.inDateTime ? parseISO(punchRec.inDateTime) : null);
               if (inDT && isValid(inDT)) {
                 const diffHours = (now.getTime() - inDT.getTime()) / (1000 * 60 * 60);
-                if (diffHours >= 16) hours = 16.0;
+                const sessionIdx = punchRec.sessionIndex || 1;
+                const threshold = sessionIdx === 2 ? 8 : 16;
+                const credited = sessionIdx === 2 ? 4.0 : 8.0;
+                if (diffHours >= threshold) {
+                  hours = credited;
+                }
               }
             }
             totalMinutes += Math.round(hours * 60);
           }
-        } else if (status === "Absent") {
+        } else if (approvedLeave) {
+          // Priority 2: No attendance + Approved Leave -> Leave
+          totalLeave++;
+        } else if (!isSun && !customHoliday) {
+          // Priority 3: No attendance + No Approved Leave -> Absent (Weekly Off/Holiday excluded from Absent)
           totalAbsent++;
         }
 
@@ -826,14 +945,61 @@ export default function AttendancePage() {
         monthKey: mKey,
         monthYear: monthYearLabel,
         present: totalPresent,
+        leave: totalLeave,
         absent: totalAbsent,
         workedHours: formatHoursToHHMM(totalHoursFloat),
+        rank: 0,          // populated asynchronously from /api/attendance/monthly-rank
         isCurrentMonth: i === 0,
       });
     }
 
     return result;
   }, [attendanceRecords, myIdentitySet, employees, holidays, leaveRequests, currentTime]);
+
+  // Fetch competition ranks server-side once employee is identified.
+  // Uses stable deps (effectiveEmployeeId only) — not monthlySummaries (which changes every second via currentTime).
+  useEffect(() => {
+    if (!isEmployeeLogin || !isMounted) return;
+
+    const myEmpId = (effectiveEmployeeId && effectiveEmployeeId !== 'N/A')
+      ? effectiveEmployeeId
+      : (verifiedUser?.employeeId || verifiedUser?.username || '');
+    if (!myEmpId) return;
+
+    // Compute the 3 month keys (current + previous 2) directly here — avoids depending on volatile monthlySummaries
+    const now = getISTTime();
+    const monthKeys = [0, 1, 2].map(i => {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    });
+
+    let cancelled = false;
+    const fetchRanks = async () => {
+      const updates: Record<string, number> = {};
+      await Promise.all(
+        monthKeys.map(async (mKey) => {
+          try {
+            const url = `/api/attendance/monthly-rank?month=${encodeURIComponent(mKey)}&employeeId=${encodeURIComponent(myEmpId)}`;
+            const res = await fetch(url, { cache: 'no-store' });
+            if (res.ok) {
+              const json = await res.json();
+              if (json.success && typeof json.rank === 'number' && json.rank > 0) {
+                updates[mKey] = json.rank;
+              }
+            }
+          } catch { /* network error — ignore */ }
+        })
+      );
+      if (!cancelled) {
+        setMonthlyRanks(updates);
+      }
+    };
+
+    fetchRanks();
+    return () => { cancelled = true; };
+  // Re-fetch only when employee changes or on mount, not every second
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isEmployeeLogin, isMounted, effectiveEmployeeId]);
 
   // 3. LEAVE HISTORY: Current Financial Year (FY) only, Approved records only, grouped month-wise
   const fyMonthWiseLeaves = useMemo(() => {
@@ -912,14 +1078,22 @@ export default function AttendancePage() {
     const now = currentTime || getISTTime();
     const todayStr = format(now, "yyyy-MM-dd");
 
-    const active = employeeRecords.find((r) => r.status === "Open" || (r.inTime && !r.outTime && r.status !== "Closed" && r.status !== "Auto OUT"));
-    const todayRecs = employeeRecords.filter((r) => r.date === todayStr && !r.id?.startsWith('missing-')).sort((a, b) => (a.sessionIndex || 1) - (b.sessionIndex || 1));
+    // Match raw attendance records for this employee directly from database
+    const myRawRecords = (attendanceRecords || []).filter(r => {
+      if (!r) return false;
+      const recEmpId = String(r.employeeId || '').trim().toUpperCase();
+      const recEmpName = String(r.employeeName || '').trim().toUpperCase();
+      return myIdentitySet.has(recEmpId) || (recEmpName && myIdentitySet.has(recEmpName));
+    });
+
+    const active = myRawRecords.find((r) => r.status === "Open" || (r.inTime && !r.outTime && r.status !== "Closed" && r.status !== "Auto OUT"));
+    const todayRecs = myRawRecords.filter((r) => r.date === todayStr).sort((a, b) => (a.sessionIndex || 1) - (b.sessionIndex || 1));
     const todayRec = todayRecs[todayRecs.length - 1] || null;
     const maxSessionsUsed = todayRecs.length >= 2 && !active;
     const sessIdx = active?.sessionIndex || (todayRecs.length + 1);
 
-    const lastClosed = employeeRecords
-      .filter((r) => r.status === "Closed" || r.status === "Auto OUT")
+    const lastClosed = myRawRecords
+      .filter((r) => (r.status === "Closed" || r.status === "Auto OUT") && r.date === todayStr)
       .sort((a, b) => {
         const adt = a.outDateTime ? parseISO(a.outDateTime) : (a.outDate && a.outTime ? parseDateTime(a.outDate, a.outTime) : null);
         const bdt = b.outDateTime ? parseISO(b.outDateTime) : (b.outDate && b.outTime ? parseDateTime(b.outDate, b.outTime) : null);
@@ -928,7 +1102,25 @@ export default function AttendancePage() {
         return bt - at;
       })[0];
 
-    const nextIn = lastClosed?.nextInEnableTime ? parseISO(lastClosed.nextInEnableTime) : null;
+    // Determine nextIn:
+    let nextIn: Date | null = null;
+    if (lastClosed && todayRecs.length === 1 && !active) {
+      const isAutoOut = lastClosed.autoOut || lastClosed.outType === 'Auto';
+      // Requirement 5: Auto OUT after 16 hours allows immediate Mark IN (no 2-minute wait)
+      if (!isAutoOut) {
+        if (lastClosed.nextInEnableTime) {
+          try { nextIn = parseISO(lastClosed.nextInEnableTime); } catch {}
+        }
+        if (!nextIn || !isValid(nextIn)) {
+          const outDT = lastClosed.outDateTime
+            ? parseISO(lastClosed.outDateTime)
+            : (lastClosed.outDate && lastClosed.outTime ? parseDateTime(lastClosed.outDate, lastClosed.outTime) : null);
+          if (outDT && isValid(outDT)) {
+            nextIn = addMinutes(outDT, 2);
+          }
+        }
+      }
+    }
 
     const inDT = (active?.inDate && active?.inTime)
       ? parseDateTime(active.inDate, active.inTime)
@@ -962,7 +1154,7 @@ export default function AttendancePage() {
       canMarkOut: !!(active && canOut),
       nextOutAvailableAt: nextOutAt && isValid(nextOutAt) ? nextOutAt : null,
     };
-  }, [employeeRecords, currentTime]);
+  }, [attendanceRecords, myIdentitySet, currentTime]);
 
   useEffect(() => {
     activeRecordRef.current = activeRecord;
@@ -1273,6 +1465,14 @@ export default function AttendancePage() {
   const handleMarkInClick = (e?: React.MouseEvent | React.FormEvent) => {
     e?.preventDefault?.();
     e?.stopPropagation?.();
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      toast({
+        variant: "destructive",
+        title: "Offline",
+        description: "You aren’t connected with internet. Please connect your device with internet",
+      });
+      return;
+    }
     if (hasUsedMaxSessions) {
       toast({
         variant: "destructive",
@@ -1289,6 +1489,15 @@ export default function AttendancePage() {
 
   const punchCheckOut = async () => {
     if (!activeRecord || isMutatingAttendance) return;
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      toast({
+        variant: "destructive",
+        title: "Offline",
+        description: "You aren’t connected with internet. Please connect your device with internet",
+      });
+      return;
+    }
 
     if (!activeRecord.inTime) {
       toast({
@@ -1338,7 +1547,8 @@ export default function AttendancePage() {
       finalHours = parseFloat((elapsedMinutes / 60).toFixed(4));
     }
 
-    const nextEnableDT = addHours(outDT, 1);
+    // Session 1 Mark OUT -> exact 2-minute waiting period before Session 2
+    const nextEnableDT = sessionIdx === 1 ? addMinutes(outDT, 2) : null;
     const recordId = activeRecord.id || (activeRecord as any)._id;
 
     if (!recordId) {
@@ -1383,7 +1593,7 @@ export default function AttendancePage() {
         stateOut: detectedPlant ? "Uttar Pradesh" : (detailedLocation.state || activeRecord.state || "NCR"),
         pincodeOut: detailedLocation.pincode || activeRecord.pincode || "N/A",
         outPlant: detectedPlant ? detectedPlant.name : (activeRecord.inPlant || "Outside"),
-        nextInEnableTime: nextEnableDT.toISOString(),
+        nextInEnableTime: nextEnableDT ? nextEnableDT.toISOString() : null,
         exitEvents: finalExitEvents,
         currentGeofenceStatus: "Shift Closed"
       };
@@ -1426,6 +1636,14 @@ export default function AttendancePage() {
   const handleMarkOutClick = (e?: React.MouseEvent | React.FormEvent) => {
     e?.preventDefault?.();
     e?.stopPropagation?.();
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      toast({
+        variant: "destructive",
+        title: "Offline",
+        description: "You aren’t connected with internet. Please connect your device with internet",
+      });
+      return;
+    }
     if (!activeRecord || !canMarkOut || isMutatingAttendance) return;
 
     setActiveDialog("OUT");
@@ -1470,7 +1688,7 @@ export default function AttendancePage() {
           autoCheckout: true,
           autoOut: true,
           autoTriggerTime: getISTTime().toISOString(),
-          nextInEnableTime: addHours(getISTTime(), 1).toISOString(),
+          nextInEnableTime: sessionIdx === 1 ? getISTTime().toISOString() : null,
           remark: `System Auto-Logged OUT (${thresholdHours}h Limit reached for Session ${sessionIdx}); Credited ${creditedHours}h fixed working time.`
         });
       }
@@ -1761,8 +1979,64 @@ export default function AttendancePage() {
 
         if (recordsByDate.has(dateStr)) {
           const dayRecords = recordsByDate.get(dateStr)!;
-          dayRecords.sort((a, b) => (b.inTime || "").localeCompare(a.inTime || ""));
-          fullHistory.push(...dayRecords);
+          if (dayRecords.length >= 2) {
+            dayRecords.sort((a, b) => (a.sessionIndex || 1) - (b.sessionIndex || 1) || (a.inTime || "").localeCompare(b.inTime || ""));
+            const s1 = dayRecords[0];
+            const s2 = dayRecords[1];
+
+            const s1HoursHHMM = calculateWorkingHoursHHMM(s1.inDate || s1.date, s1.inTime, s1.outDate || s1.date, s1.outTime, s1.hours);
+            const s2HoursHHMM = calculateWorkingHoursHHMM(s2.inDate || s2.date, s2.inTime, s2.outDate || s2.date, s2.outTime, s2.hours);
+            const totalDecimalHours = parseFloat(((parseFloat(s1.hours) || 0) + (parseFloat(s2.hours) || 0)).toFixed(4));
+            const totalHoursHHMM = formatHoursToHHMM(totalDecimalHours);
+
+            const s1Plant = s1.inPlant && s1.inPlant !== "N/A" ? s1.inPlant : (s1.attendanceType || "Plant");
+            const s2Plant = s2.inPlant && s2.inPlant !== "N/A" ? s2.inPlant : (s2.attendanceType || "Plant");
+
+            const s1InTime = s1.inTime ? formatToReadableISTTime(s1.inTime) : "--:--";
+            const s2InTime = s2.inTime ? formatToReadableISTTime(s2.inTime) : "--:--";
+            const s1OutTime = s1.outTime ? formatToReadableISTTime(s1.outTime) : "--:--";
+            const s2OutTime = s2.outTime ? formatToReadableISTTime(s2.outTime) : "--:--";
+
+            const s1InLoc = s1.address || "N/A";
+            const s2InLoc = s2.address || "N/A";
+            const s1OutLoc = s1.addressOut || "N/A";
+            const s2OutLoc = s2.addressOut || "N/A";
+
+            const consolidatedRecord = {
+              id: `${s1.id || s1._id}_${s2.id || s2._id}`,
+              isMultiSession: true,
+              date: dateStr,
+              employeeName: s1.employeeName || selectedAdminEmployee?.name || "Employee",
+              session1: s1,
+              session2: s2,
+              s1Plant,
+              s2Plant,
+              s1InTime,
+              s2InTime,
+              s1OutTime,
+              s2OutTime,
+              s1InLoc,
+              s2InLoc,
+              s1OutLoc,
+              s2OutLoc,
+              s1HoursHHMM,
+              s2HoursHHMM,
+              totalHoursHHMM,
+              inPlant: s1Plant === s2Plant ? s1Plant : `${s1Plant} | ${s2Plant}`,
+              inTime: `${s1InTime} | ${s2InTime}`,
+              outTime: `${s1OutTime} | ${s2OutTime}`,
+              address: `${s1InLoc} | ${s2InLoc}`,
+              addressOut: `${s1OutLoc} | ${s2OutLoc}`,
+              hours: totalDecimalHours,
+              status: (s1.status === 'Open' || s2.status === 'Open') ? 'Open' :
+                      (s1.status === 'Auto OUT' || s2.status === 'Auto OUT') ? 'Auto OUT' :
+                      (s1.status === 'Closed' && s2.status === 'Closed') ? 'Closed' : s1.status,
+              remark: s1.remark && s2.remark && s1.remark !== s2.remark ? `${s1.remark} | ${s2.remark}` : (s1.remark || s2.remark || "Completed"),
+            };
+            fullHistory.push(consolidatedRecord);
+          } else {
+            fullHistory.push(...dayRecords);
+          }
         } else {
           const isSun = isSunday(currentD);
           const holidayObj = holidays.find((h: any) => h.date === dateStr);
@@ -2100,39 +2374,99 @@ export default function AttendancePage() {
                             </div>
                           </TableCell>
                           <TableCell className="text-xs font-bold text-slate-600">
-                            {r.inPlant && r.inPlant !== "N/A" ? r.inPlant : (r.attendanceType || "N/A")}
+                            {r.isMultiSession ? (
+                              <div className="text-xs font-bold text-slate-700 whitespace-nowrap">
+                                <span>{r.s1Plant}</span>
+                                <span className="text-slate-400 mx-1.5 font-normal">|</span>
+                                <span>{r.s2Plant}</span>
+                              </div>
+                            ) : (
+                              r.inPlant && r.inPlant !== "N/A" ? r.inPlant : (r.attendanceType || "N/A")
+                            )}
                           </TableCell>
-                          <TableCell className="text-xs font-bold text-slate-600">{r.inTime || "--:--"}</TableCell>
-                          <TableCell className="text-xs font-bold text-slate-600">{r.outTime || "--:--"}</TableCell>
+                          <TableCell className="text-xs font-bold text-slate-600">
+                            {r.isMultiSession ? (
+                              <div className="text-xs font-bold text-slate-700 whitespace-nowrap">
+                                <span>{r.s1InTime}</span>
+                                <span className="text-slate-400 mx-1.5 font-normal">|</span>
+                                <span>{r.s2InTime}</span>
+                              </div>
+                            ) : (
+                              r.inTime || "--:--"
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs font-bold text-slate-600">
+                            {r.isMultiSession ? (
+                              <div className="text-xs font-bold text-slate-700 whitespace-nowrap">
+                                <span>{r.s1OutTime}</span>
+                                <span className="text-slate-400 mx-1.5 font-normal">|</span>
+                                <span>{r.s2OutTime}</span>
+                              </div>
+                            ) : (
+                              r.outTime || "--:--"
+                            )}
+                          </TableCell>
                           <TableCell className="hidden md:table-cell text-[10px] font-medium text-slate-500 max-w-[150px] truncate" title={r.address}>
-                            {r.address || "N/A"}
+                            {r.isMultiSession ? (
+                              <span>{r.s1InLoc} | {r.s2InLoc}</span>
+                            ) : (
+                              r.address || "N/A"
+                            )}
                           </TableCell>
                           <TableCell className="hidden md:table-cell text-[10px] font-medium text-slate-500 max-w-[150px] truncate" title={r.addressOut}>
-                            {r.addressOut || "N/A"}
+                            {r.isMultiSession ? (
+                              <span>{r.s1OutLoc} | {r.s2OutLoc}</span>
+                            ) : (
+                              r.addressOut || "N/A"
+                            )}
                           </TableCell>
                           <TableCell>
-                            <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
-                              {calculateWorkingHoursHHMM(r.inDate || r.date, r.inTime, r.outDate || r.date, r.outTime, r.hours)}
-                            </Badge>
+                            {r.isMultiSession ? (
+                              <div className="flex flex-col items-start gap-0.5">
+                                <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
+                                  {r.totalHoursHHMM}
+                                </Badge>
+                                <span className="text-[9px] font-semibold text-slate-500 whitespace-nowrap">
+                                  {r.s1HoursHHMM} <span className="text-slate-300">|</span> {r.s2HoursHHMM}
+                                </span>
+                              </div>
+                            ) : (
+                              <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
+                                {calculateWorkingHoursHHMM(r.inDate || r.date, r.inTime, r.outDate || r.date, r.outTime, r.hours)}
+                              </Badge>
+                            )}
                           </TableCell>
                           <TableCell className="hidden lg:table-cell text-[10px] font-medium text-slate-500 max-w-[140px] truncate" title={r.remark}>
                             {r.remark || "N/A"}
                           </TableCell>
                           <TableCell className="text-right pr-6">
-                            <Badge className={cn("text-[9px] font-black uppercase px-2 py-0.5 whitespace-nowrap",
-                              r.status === 'Auto OUT' ? "bg-amber-100 text-amber-700 hover:bg-amber-100" :
-                                r.status === 'Open' ? "bg-blue-100 text-blue-700 hover:bg-blue-100" :
-                                  r.status === 'Absent' ? "bg-rose-100 text-rose-700 hover:bg-rose-100" :
-                                    r.status === 'Leave' ? "bg-purple-100 text-purple-700 hover:bg-purple-100" :
-                                      (r.status === 'Weekly Off' || r.status === 'Holiday') ? "bg-slate-100 text-slate-700 hover:bg-slate-100" :
-                                        "bg-emerald-100 text-emerald-700 hover:bg-emerald-100"
-                            )}>
-                              {r.status === 'Open' ? 'Active Shift' :
-                                r.status === 'Closed' ? 'Completed Shift' :
-                                  r.status === 'Auto OUT' ? 'Auto Closed' :
-                                    r.status === 'Leave' ? 'Approved Leave' :
-                                      r.status}
-                            </Badge>
+                            {r.isMultiSession ? (
+                              <div className="flex flex-col items-end gap-1">
+                                <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 text-[9px] font-black uppercase px-2 py-0.5 whitespace-nowrap">
+                                  2 Sessions
+                                </Badge>
+                                {(r.session1?.status === 'Auto OUT' || r.session2?.status === 'Auto OUT') && (
+                                  <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100 text-[8px] font-bold px-1.5 py-0.5 whitespace-nowrap">
+                                    Auto OUT
+                                  </Badge>
+                                )}
+                              </div>
+                            ) : (
+                              <Badge className={cn("text-[9px] font-black uppercase px-2 py-0.5 whitespace-nowrap",
+                                r.status === 'Auto OUT' ? "bg-amber-100 text-amber-700 hover:bg-amber-100" :
+                                  r.status === 'Open' ? "bg-blue-100 text-blue-700 hover:bg-blue-100" :
+                                    r.status === 'Absent' ? "bg-rose-100 text-rose-700 hover:bg-rose-100" :
+                                      r.status === 'Leave' ? "bg-purple-100 text-purple-700 hover:bg-purple-100" :
+                                        (r.status === 'Weekly Off' || r.status === 'Holiday') ? "bg-slate-100 text-slate-700 hover:bg-slate-100" :
+                                          "bg-emerald-100 text-emerald-700 hover:bg-emerald-100"
+                              )}>
+                                {r.status === 'Open' ? 'Active Shift' :
+                                  r.status === 'Closed' ? 'Completed Shift' :
+                                    r.status === 'Auto OUT' ? 'Auto Closed' :
+                                      r.status === 'Leave' ? 'Approved Leave' :
+                                        r.status}
+                              </Badge>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))
@@ -2227,6 +2561,21 @@ export default function AttendancePage() {
               )}
             </div>
 
+            {/* Internet Connectivity Status (Requirement 1) */}
+            {!isOnline && (
+              <div className="p-4 bg-rose-50 border border-rose-300 rounded-2xl text-rose-900 shadow-sm flex items-center gap-3 animate-in fade-in">
+                <WifiOff className="w-5 h-5 text-rose-600 shrink-0" />
+                <div className="text-left">
+                  <p className="text-xs font-black uppercase tracking-tight text-rose-900">
+                    Connection Required
+                  </p>
+                  <p className="text-xs font-bold text-rose-700 mt-0.5">
+                    You aren’t connected with internet. Please connect your device with internet
+                  </p>
+                </div>
+              </div>
+            )}
+
             {/* Daily Sessions Limit Alert */}
             {hasUsedMaxSessions && (
               <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl text-amber-900 shadow-sm flex items-center gap-3 animate-in fade-in">
@@ -2285,13 +2634,17 @@ export default function AttendancePage() {
               <Button
                 type="button"
                 className={cn("flex-1 h-16 text-sm font-black rounded-2xl shadow-xl transition-all uppercase tracking-widest",
-                  (!activeRecord && !isCooldownLocked && !hasUsedMaxSessions) ? "bg-primary text-white shadow-primary/20 hover:bg-primary/90" : "bg-slate-100 text-slate-400"
+                  (!isOnline || !!activeRecord || isCooldownLocked || hasUsedMaxSessions) ? "bg-slate-100 text-slate-400" : "bg-primary text-white shadow-primary/20 hover:bg-primary/90"
                 )}
-                disabled={isLoadingLocation || isMutatingAttendance || !!activeRecord || isCooldownLocked || hasUsedMaxSessions}
+                disabled={!isOnline || isLoadingLocation || isMutatingAttendance || !!activeRecord || isCooldownLocked || hasUsedMaxSessions}
                 onClick={handleMarkInClick}
               >
-                {isLoadingLocation && activeDialog === 'NONE' ? (
+                {isMutatingAttendance ? (
+                  <span className="flex items-center gap-2"><Loader2 className="w-5 h-5 animate-spin" /> Processing...</span>
+                ) : isLoadingLocation && activeDialog === 'NONE' ? (
                   <span className="flex items-center gap-2"><Loader2 className="w-5 h-5 animate-spin" /> {t.fetchingGps}</span>
+                ) : !isOnline ? (
+                  "Offline"
                 ) : hasUsedMaxSessions ? (
                   t.twoSessionsUsed
                 ) : todaySessions.length === 1 ? (
@@ -2304,16 +2657,26 @@ export default function AttendancePage() {
                 type="button"
                 className={cn(
                   "flex-1 h-16 text-sm font-black rounded-2xl shadow-xl transition-all uppercase tracking-widest",
-                  activeRecord ? "bg-rose-600 text-white shadow-rose-200 hover:bg-rose-700" : "bg-slate-100 text-slate-400",
+                  (!isOnline || !activeRecord) ? "bg-slate-100 text-slate-400" : "bg-rose-600 text-white shadow-rose-200 hover:bg-rose-700",
                   activeRecord && !canMarkOut ? "opacity-70 hover:bg-rose-600/90" : ""
                 )}
-                disabled={isLoadingLocation || isMutatingAttendance || !activeRecord || (activeRecord ? !canMarkOut : false)}
+                disabled={!isOnline || isLoadingLocation || isMutatingAttendance || !activeRecord || (activeRecord ? !canMarkOut : false)}
                 onClick={handleMarkOutClick}
               >
-                {activeRecord && !canMarkOut ? t.markOutLocked : (isLoadingLocation && activeDialog === 'NONE' ? <>
-                  <Loader2 className="w-5 h-5 animate-spin mr-2" />
-                  {t.markOut}
-                </> : t.markOut)}
+                {isMutatingAttendance ? (
+                  <span className="flex items-center gap-2"><Loader2 className="w-5 h-5 animate-spin" /> Processing...</span>
+                ) : activeRecord && !canMarkOut ? (
+                  t.markOutLocked
+                ) : !isOnline ? (
+                  "Offline"
+                ) : isLoadingLocation && activeDialog === 'NONE' ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin mr-2" />
+                    {t.markOut}
+                  </>
+                ) : (
+                  t.markOut
+                )}
               </Button>
             </div>
 
@@ -2349,7 +2712,7 @@ export default function AttendancePage() {
                             ? parseDateTime(activeRecord.date, activeRecord.inTime)
                             : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
                         const dateFormatted = startDT && isValid(startDT) ? format(startDT, "dd-MMM-yyyy") : (activeRecord.inDate || activeRecord.date || format(getISTTime(), "dd-MMM-yyyy"));
-                        return `${t.shiftStarted(dateFormatted, activeRecord.inTime)} • ${activeRecord.sessionIndex === 2 ? t.maxAutoOut8h : t.maxAutoOut16h}`;
+                        return `${t.shiftStarted(dateFormatted, activeRecord.inTime || "--:--")} • ${activeRecord.sessionIndex === 2 ? t.maxAutoOut8h : t.maxAutoOut16h}`;
                       })()}
                     </span>
                   </div>
@@ -2423,43 +2786,103 @@ export default function AttendancePage() {
                             </div>
                           </TableCell>
                           <TableCell className="text-xs font-bold text-slate-600">
-                            {r.inPlant && r.inPlant !== "N/A" ? r.inPlant : (r.attendanceType === 'WFH' ? t.workFromHome : r.attendanceType === 'FIELD' ? t.fieldWork : (r.attendanceType || "N/A"))}
+                            {r.isMultiSession ? (
+                              <div className="text-xs font-bold text-slate-700 whitespace-nowrap">
+                                <span>{r.s1Plant}</span>
+                                <span className="text-slate-400 mx-1.5 font-normal">|</span>
+                                <span>{r.s2Plant}</span>
+                              </div>
+                            ) : (
+                              r.inPlant && r.inPlant !== "N/A" ? r.inPlant : (r.attendanceType === 'WFH' ? t.workFromHome : r.attendanceType === 'FIELD' ? t.fieldWork : (r.attendanceType || "N/A"))
+                            )}
                           </TableCell>
-                          <TableCell className="text-xs font-bold text-slate-600">{r.inTime || "--:--"}</TableCell>
-                          <TableCell className="text-xs font-bold text-slate-600">{r.outTime || "--:--"}</TableCell>
+                          <TableCell className="text-xs font-bold text-slate-600">
+                            {r.isMultiSession ? (
+                              <div className="text-xs font-bold text-slate-700 whitespace-nowrap">
+                                <span>{r.s1InTime}</span>
+                                <span className="text-slate-400 mx-1.5 font-normal">|</span>
+                                <span>{r.s2InTime}</span>
+                              </div>
+                            ) : (
+                              r.inTime || "--:--"
+                            )}
+                          </TableCell>
+                          <TableCell className="text-xs font-bold text-slate-600">
+                            {r.isMultiSession ? (
+                              <div className="text-xs font-bold text-slate-700 whitespace-nowrap">
+                                <span>{r.s1OutTime}</span>
+                                <span className="text-slate-400 mx-1.5 font-normal">|</span>
+                                <span>{r.s2OutTime}</span>
+                              </div>
+                            ) : (
+                              r.outTime || "--:--"
+                            )}
+                          </TableCell>
                           <TableCell className="hidden md:table-cell text-[10px] font-medium text-slate-500 max-w-[140px] truncate" title={r.address}>
-                            {r.address || "N/A"}
+                            {r.isMultiSession ? (
+                              <span>{r.s1InLoc} | {r.s2InLoc}</span>
+                            ) : (
+                              r.address || "N/A"
+                            )}
                           </TableCell>
                           <TableCell className="hidden md:table-cell text-[10px] font-medium text-slate-500 max-w-[140px] truncate" title={r.addressOut}>
-                            {r.addressOut || "N/A"}
+                            {r.isMultiSession ? (
+                              <span>{r.s1OutLoc} | {r.s2OutLoc}</span>
+                            ) : (
+                              r.addressOut || "N/A"
+                            )}
                           </TableCell>
                           <TableCell>
-                            <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
-                              {calculateWorkingHoursHHMM(r.inDate || r.date, r.inTime, r.outDate || r.date, r.outTime, r.hours)}
-                            </Badge>
+                            {r.isMultiSession ? (
+                              <div className="flex flex-col items-start gap-0.5">
+                                <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
+                                  {r.totalHoursHHMM}
+                                </Badge>
+                                <span className="text-[9px] font-semibold text-slate-500 whitespace-nowrap">
+                                  {r.s1HoursHHMM} <span className="text-slate-300">|</span> {r.s2HoursHHMM}
+                                </span>
+                              </div>
+                            ) : (
+                              <Badge variant="outline" className={cn("font-black text-[10px]", getWorkingHoursColor(r.hours || 0))}>
+                                {calculateWorkingHoursHHMM(r.inDate || r.date, r.inTime, r.outDate || r.date, r.outTime, r.hours)}
+                              </Badge>
+                            )}
                           </TableCell>
                           <TableCell className="hidden lg:table-cell text-[10px] font-medium text-slate-500 max-w-[130px] truncate" title={r.remark}>
                             {r.remark || "N/A"}
                           </TableCell>
                           <TableCell className="text-right pr-4">
-                            <Badge className={cn("text-[9px] font-black uppercase px-2 py-0.5 whitespace-nowrap",
-                              r.status === 'Auto OUT' ? "bg-amber-100 text-amber-700 hover:bg-amber-100" :
-                                r.status === 'Open' ? "bg-blue-100 text-blue-700 hover:bg-blue-100" :
-                                  r.status === 'Absent' ? "bg-rose-100 text-rose-700 hover:bg-rose-100" :
-                                    r.status === 'Leave' ? "bg-purple-100 text-purple-700 hover:bg-purple-100" :
-                                      (r.status === 'Weekly Off' || r.status === 'Holiday') ? "bg-slate-100 text-slate-700 hover:bg-slate-100" :
-                                        "bg-emerald-100 text-emerald-700 hover:bg-emerald-100"
-                            )}>
-                              {r.status === 'Open' ? t.statusActiveShift :
-                                r.status === 'Closed' ? t.statusCompletedShift :
-                                  r.status === 'Auto OUT' ? t.statusAutoClosedShift :
-                                    r.status === 'Leave' ? t.statusApprovedLeave :
-                                      r.status === 'Weekly Off' ? t.statusWeeklyOff :
-                                        r.status === 'Holiday' ? t.statusHoliday :
-                                          r.status === 'Absent' ? t.statusAbsent :
-                                            r.status === 'Present' ? t.statusPresent :
-                                              r.status}
-                            </Badge>
+                            {r.isMultiSession ? (
+                              <div className="flex flex-col items-end gap-1">
+                                <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 text-[9px] font-black uppercase px-2 py-0.5 whitespace-nowrap">
+                                  2 Sessions
+                                </Badge>
+                                {(r.session1?.status === 'Auto OUT' || r.session2?.status === 'Auto OUT') && (
+                                  <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100 text-[8px] font-bold px-1.5 py-0.5 whitespace-nowrap">
+                                    Auto OUT
+                                  </Badge>
+                                )}
+                              </div>
+                            ) : (
+                              <Badge className={cn("text-[9px] font-black uppercase px-2 py-0.5 whitespace-nowrap",
+                                r.status === 'Auto OUT' ? "bg-amber-100 text-amber-700 hover:bg-amber-100" :
+                                  r.status === 'Open' ? "bg-blue-100 text-blue-700 hover:bg-blue-100" :
+                                    r.status === 'Absent' ? "bg-rose-100 text-rose-700 hover:bg-rose-100" :
+                                      r.status === 'Leave' ? "bg-purple-100 text-purple-700 hover:bg-purple-100" :
+                                        (r.status === 'Weekly Off' || r.status === 'Holiday') ? "bg-slate-100 text-slate-700 hover:bg-slate-100" :
+                                          "bg-emerald-100 text-emerald-700 hover:bg-emerald-100"
+                              )}>
+                                {r.status === 'Open' ? t.statusActiveShift :
+                                  r.status === 'Closed' ? t.statusCompletedShift :
+                                    r.status === 'Auto OUT' ? t.statusAutoClosedShift :
+                                      r.status === 'Leave' ? t.statusApprovedLeave :
+                                        r.status === 'Weekly Off' ? t.statusWeeklyOff :
+                                          r.status === 'Holiday' ? t.statusHoliday :
+                                            r.status === 'Absent' ? t.statusAbsent :
+                                              r.status === 'Present' ? t.statusPresent :
+                                                r.status}
+                              </Badge>
+                            )}
                           </TableCell>
                         </TableRow>
                       ))}
@@ -2490,8 +2913,10 @@ export default function AttendancePage() {
                     <TableRow>
                       <TableHead className="font-black uppercase text-[10px]">{t.month}</TableHead>
                       <TableHead className="font-black uppercase text-[10px] text-right">{t.present}</TableHead>
-                      <TableHead className="font-black uppercase text-[10px] text-right pr-4">{t.absent}</TableHead>
-                      <TableHead className="font-black uppercase text-[10px] text-right pr-4">{t.worked}</TableHead>
+                      <TableHead className="font-black uppercase text-[10px] text-right">{t.leave}</TableHead>
+                      <TableHead className="font-black uppercase text-[10px] text-right">{t.absent}</TableHead>
+                      <TableHead className="font-black uppercase text-[10px] text-right">{t.worked}</TableHead>
+                      <TableHead className="font-black uppercase text-[10px] text-right pr-4">{t.rank}</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -2499,8 +2924,14 @@ export default function AttendancePage() {
                       <TableRow key={idx} className="hover:bg-slate-50/50">
                         <TableCell className="font-bold text-xs text-slate-800 py-3">{summary.monthYear}</TableCell>
                         <TableCell className="font-black text-xs text-emerald-600 text-right">{summary.present}</TableCell>
-                        <TableCell className="font-black text-xs text-rose-600 text-right pr-4">{summary.absent}</TableCell>
-                        <TableCell className="font-black text-xs text-slate-600 text-right pr-4">{summary.workedHours}</TableCell>
+                        <TableCell className="font-black text-xs text-amber-600 text-right">{summary.leave}</TableCell>
+                        <TableCell className="font-black text-xs text-rose-600 text-right">{summary.absent}</TableCell>
+                        <TableCell className="font-black text-xs text-slate-600 text-right">{summary.workedHours}</TableCell>
+                        <TableCell className="font-black text-xs text-primary text-right pr-4">
+                          {monthlyRanks[summary.monthKey]
+                            ? toOrdinal(monthlyRanks[summary.monthKey])
+                            : <span className="text-slate-400 text-xs">—</span>}
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
@@ -2809,7 +3240,7 @@ export default function AttendancePage() {
                         ? parseDateTime(activeRecord.date, activeRecord.inTime)
                         : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
                     const dateFormatted = startDT && isValid(startDT) ? format(startDT, "dd-MMM-yyyy") : (activeRecord.inDate || activeRecord.date || format(getISTTime(), "dd-MMM-yyyy"));
-                    return t.shiftStarted(dateFormatted, activeRecord.inTime);
+                    return t.shiftStarted(dateFormatted, activeRecord.inTime || "--:--");
                   })()}
                 </span>
               </div>

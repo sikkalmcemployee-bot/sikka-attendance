@@ -63,7 +63,8 @@ async function processAutoMarkOut() {
         const creditOutDT = addHours(inDT, creditedHours);
         const finalOutDate = format(creditOutDT, "yyyy-MM-dd");
         const finalOutTime = format(creditOutDT, "HH:mm");
-        const nextInEnableDT = addHours(now, 1);
+        // Immediate Mark IN after 16-hour auto mark out (no 2-minute rest period)
+        const nextInEnableDT = sessionIdx === 1 ? now : null;
 
         const updatePayload: any = {
           outTime: finalOutTime,
@@ -75,7 +76,7 @@ async function processAutoMarkOut() {
           autoOut: true,
           autoCheckout: true,
           autoTriggerTime: now.toISOString(),
-          nextInEnableTime: nextInEnableDT.toISOString(),
+          nextInEnableTime: nextInEnableDT ? nextInEnableDT.toISOString() : null,
           currentGeofenceStatus: "Shift Closed",
           remark: `System Auto-Logged OUT (${thresholdHours}h Limit reached for Session ${sessionIdx}); Credited ${creditedHours}h fixed working time.`,
           updatedAt: now.toISOString(),

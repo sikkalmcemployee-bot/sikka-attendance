@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/mongodb';
 import { getSessionUser } from '@/lib/auth/session';
-import { format, parseISO, addHours, isValid } from 'date-fns';
+import { format, parseISO, addHours, addMinutes, isValid } from 'date-fns';
 import { ObjectId } from 'mongodb';
 import { invalidateBootstrapCache, updateCachedCollection } from '@/lib/data-cache';
 import { parseDateTime } from '@/lib/utils';
@@ -189,8 +189,12 @@ export async function POST(req: Request) {
     finalHours = Math.min(finalHours, maxAllowedRemaining);
     finalHours = parseFloat(finalHours.toFixed(4));
 
-    // 1-hour rest period / cool-off after Mark OUT
-    const nextEnableDT = addHours(outDT, 1);
+    // Rest period: Session 1 manual Mark OUT -> exact 2-minute waiting period before Session 2 Mark IN can be enabled.
+    // Session 2 manual Mark OUT -> Session 2 is completed, no further attendance action for that date.
+    let nextEnableDT: Date | null = null;
+    if (sessionIdx === 1) {
+      nextEnableDT = addMinutes(outDT, 2);
+    }
 
     const {
       latitude,
@@ -228,7 +232,7 @@ export async function POST(req: Request) {
       stateOut: state || activeRecord.state || "Uttar Pradesh",
       pincodeOut: pincode || activeRecord.pincode || "N/A",
       outPlant: finalOutPlant,
-      nextInEnableTime: nextEnableDT.toISOString(),
+      nextInEnableTime: nextEnableDT ? nextEnableDT.toISOString() : null,
       currentGeofenceStatus: "Shift Closed",
       updatedAt: now.toISOString(),
     };
