@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/mongodb';
 import { getSessionUser } from '@/lib/auth/session';
-import { format, parseISO, addHours, addMinutes, isValid } from 'date-fns';
+import { format, parseISO, addHours, isValid } from 'date-fns';
 import { ObjectId } from 'mongodb';
 import { invalidateBootstrapCache, updateCachedCollection } from '@/lib/data-cache';
 import { parseDateTime } from '@/lib/utils';
@@ -131,6 +131,14 @@ export async function POST(req: Request) {
       );
     }
 
+    // 5. Block manual Mark OUT if attendance was already auto-closed
+    if (activeRecord.autoOut === true || activeRecord.status === 'Auto OUT') {
+      return NextResponse.json(
+        { success: false, message: "This attendance record has already been automatically closed. Manual Mark OUT is not allowed." },
+        { status: 400 }
+      );
+    }
+
     const now = getISTTime();
     const outTimeStr = format(now, "HH:mm");
     const outDateStr = format(now, "yyyy-MM-dd");
@@ -138,7 +146,6 @@ export async function POST(req: Request) {
 
     // ── Working-Hour Calculation (Manual OUT) ──────────────────────────────
     // Rule: Manual OUT = actual OUT timestamp − actual IN timestamp.
-    // Resolution: Exact minute resolution matching inTime (HH:mm) and outTime (HH:mm).
     const inDateStr = activeRecord.inDate || activeRecord.date || outDateStr;
     const inTimeStr = activeRecord.inTime;
     let inDT: Date | null = null;
@@ -151,12 +158,10 @@ export async function POST(req: Request) {
       }
     }
 
-    const sessionIdx = activeRecord.sessionIndex || 1;
-
     let finalHours = 0;
     if (inDT && isValid(inDT)) {
       let diffMs = outDT.getTime() - inDT.getTime();
-      // Handle overnight shift crossing midnight if outDate is same or not incremented
+      // Handle overnight shift crossing midnight
       if (diffMs < 0) {
         const nextDayOutDT = addHours(outDT, 24);
         if (nextDayOutDT.getTime() - inDT.getTime() >= 0 && nextDayOutDT.getTime() - inDT.getTime() <= 24 * 3600 * 1000) {
@@ -174,27 +179,12 @@ export async function POST(req: Request) {
       }
       // Store exact elapsed minutes divided by 60 for perfect HH:MM alignment
       const elapsedMinutes = Math.max(0, Math.round(diffMs / 60000));
-      finalHours = elapsedMinutes / 60;
+      finalHours = parseFloat((elapsedMinutes / 60).toFixed(4));
     }
 
-    // Rule: Max 24 combined daily hours across all sessions
-    const otherSessions = await attendanceCol.find({
-      employeeId: { $in: [internalEmpId, matchedEmp.employeeId, matchedEmp.id].filter(Boolean) },
-      date: activeRecord.date || outDateStr,
-      _id: { $ne: activeRecord._id }
-    }).toArray();
-
-    const otherHoursTotal = otherSessions.reduce((acc: number, s: any) => acc + (parseFloat(s.hours) || 0), 0);
-    const maxAllowedRemaining = Math.max(0, 24 - otherHoursTotal);
-    finalHours = Math.min(finalHours, maxAllowedRemaining);
+    // Cap at 24 hours maximum
+    finalHours = Math.min(finalHours, 24);
     finalHours = parseFloat(finalHours.toFixed(4));
-
-    // Rest period: Session 1 manual Mark OUT -> exact 2-minute waiting period before Session 2 Mark IN can be enabled.
-    // Session 2 manual Mark OUT -> Session 2 is completed, no further attendance action for that date.
-    let nextEnableDT: Date | null = null;
-    if (sessionIdx === 1) {
-      nextEnableDT = addMinutes(outDT, 2);
-    }
 
     const {
       latitude,
@@ -232,7 +222,7 @@ export async function POST(req: Request) {
       stateOut: state || activeRecord.state || "Uttar Pradesh",
       pincodeOut: pincode || activeRecord.pincode || "N/A",
       outPlant: finalOutPlant,
-      nextInEnableTime: nextEnableDT ? nextEnableDT.toISOString() : null,
+      nextInEnableTime: null, // No cooldown — next Mark IN allowed on next calendar date
       currentGeofenceStatus: "Shift Closed",
       updatedAt: now.toISOString(),
     };

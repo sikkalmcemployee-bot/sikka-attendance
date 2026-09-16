@@ -4,9 +4,10 @@ export const dynamic = "force-dynamic";
 
 /**
  * Cron Job Entrypoint for Server-side Automatic Mark OUT.
- * Evaluates active attendance sessions:
- * - Session 1: auto mark out after 16 hours (credited 8h)
- * - Session 2: auto mark out after 8 hours (credited 4h)
+ * Evaluates all active (Open) attendance sessions:
+ * - Auto Mark OUT trigger: 16 hours after Mark IN
+ * - Recorded Mark OUT time: 8 hours after Mark IN (for working-hour calculation)
+ * - Working Hours credited: 8.00 hours
  */
 export async function GET(req: Request) {
   return executeAutoMarkOutCron(req);

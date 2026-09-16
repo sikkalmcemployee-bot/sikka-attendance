@@ -119,7 +119,7 @@ export async function POST(req: Request) {
 
     const empIdMatches = [internalEmpId, matchedEmp.employeeId, matchedEmp.id, cleanSessionEmpId].filter(Boolean);
 
-    // 4. Check for any existing active Open shift (across all dates)
+    // 4. Check for any existing active Open shift and auto-close if stale (16h threshold)
     const anyOpenShift = await attendanceCol.findOne({
       employeeId: { $in: empIdMatches },
       status: 'Open'
@@ -135,14 +135,14 @@ export async function POST(req: Request) {
         try { openInDT = parseISO(anyOpenShift.inDateTime); } catch {}
       }
 
-      const openSessionIdx = anyOpenShift.sessionIndex || 1;
-      const thresholdHours = openSessionIdx === 2 ? 8 : 16;
-      const creditedHours = openSessionIdx === 2 ? 4.0 : 8.0;
+      // Auto Mark OUT: trigger at 16 hours after Mark IN, record 8 hours of working time
+      const thresholdHours = 16;
+      const creditedHours = 8.0;
 
       if (openInDT && isValid(openInDT)) {
         const elapsedHours = (now.getTime() - openInDT.getTime()) / (1000 * 60 * 60);
         if (elapsedHours >= thresholdHours) {
-          // Auto-close expired shift with credited hours (+8h for S1, +4h for S2)
+          // Auto-close the stale open shift: record OUT at inDT + 8h (not trigger time)
           const creditOutDT = addHours(openInDT, creditedHours);
           const autoOutPayload: any = {
             outTime: format(creditOutDT, "HH:mm"),
@@ -154,9 +154,9 @@ export async function POST(req: Request) {
             autoOut: true,
             autoCheckout: true,
             autoTriggerTime: now.toISOString(),
-            nextInEnableTime: now.toISOString(), // Immediate eligibility per requirement 5
+            nextInEnableTime: now.toISOString(),
             currentGeofenceStatus: "Shift Closed",
-            remark: `System Auto-Logged OUT (${thresholdHours}h Limit reached for Session ${openSessionIdx}); Credited ${creditedHours}h fixed working time.`,
+            remark: `System Auto-Logged OUT (16h limit reached). Recorded working time: ${creditedHours}h.`,
             updatedAt: now.toISOString(),
           };
           await attendanceCol.updateOne({ _id: anyOpenShift._id }, { $set: autoOutPayload });
@@ -167,6 +167,7 @@ export async function POST(req: Request) {
             action: 'auto_out',
             data: autoOutRecord,
           });
+          // After auto-closing the stale open shift, fall through to create today's new Mark IN
         } else {
           return NextResponse.json(
             {
@@ -189,54 +190,25 @@ export async function POST(req: Request) {
       }
     }
 
-    // 5. Check today's existing attendance sessions (Max 2 sessions per day)
-    const todaySessions = await attendanceCol.find({
+    // 5. ONE MARK IN PER EMPLOYEE PER CALENDAR DATE
+    // Check if any attendance record (any status) already exists for this employee today.
+    const todayRecord = await attendanceCol.findOne({
       employeeId: { $in: empIdMatches },
       date: todayStr
-    }).sort({ createdAt: 1 }).toArray();
+    });
 
-    if (todaySessions.length >= 2) {
+    if (todayRecord) {
       return NextResponse.json(
         {
           success: false,
-          message: "You have already used the maximum 2 attendance sessions allowed for today."
+          message: "You have already marked IN for today. A new Mark IN is only allowed on the next calendar date.",
+          data: todayRecord
         },
         { status: 400 }
       );
     }
 
-    // 6. If Session 1 completed, validate the 2-minute waiting period
-    if (todaySessions.length === 1) {
-      const s1 = todaySessions[0];
-      const isAutoOut = s1.autoOut || s1.outType === 'Auto';
-      // Only manual Mark OUT has a 2-minute waiting period. Auto OUT after 16 hours allows immediate Mark IN (Requirement 5).
-      if (!isAutoOut) {
-        let s1OutDT: Date | null = null;
-        if (s1.outDateTime) {
-          try { s1OutDT = parseISO(s1.outDateTime); } catch {}
-        }
-        if (!s1OutDT || !isValid(s1OutDT)) {
-          if (s1.outDate && s1.outTime) {
-            s1OutDT = parseDateTime(s1.outDate, s1.outTime);
-          }
-        }
-        if (s1OutDT && isValid(s1OutDT)) {
-          const enableTimeMs = s1OutDT.getTime() + (2 * 60 * 1000); // exactly 2 minutes
-          if (now.getTime() < enableTimeMs) {
-            const remainingSec = Math.ceil((enableTimeMs - now.getTime()) / 1000);
-            return NextResponse.json(
-              {
-                success: false,
-                message: `Please wait for the 2-minute rest period to complete. Remaining time: ${remainingSec}s.`
-              },
-              { status: 400 }
-            );
-          }
-        }
-      }
-    }
-
-    // 7. Duplicate request protection (prevent double-taps within 5 seconds)
+    // 6. Duplicate request protection (prevent double-taps within 5 seconds)
     const recentRecord = await attendanceCol.findOne(
       { employeeId: { $in: empIdMatches } },
       { sort: { createdAt: -1 } }
@@ -251,9 +223,7 @@ export async function POST(req: Request) {
       }
     }
 
-    const sessionIndex = todaySessions.length + 1; // 1 for first session, 2 for second session
-
-    // 5. Build Attendance Record with all required fields
+    // 7. Build Attendance Record with all required fields
     const {
       latitude,
       longitude,
@@ -275,41 +245,6 @@ export async function POST(req: Request) {
     const finalLat = parseFloat(lat ?? latitude ?? 28.6329);
     const finalLng = parseFloat(lng ?? longitude ?? 77.4357);
 
-    // 4c. Rule: Session 2 Mark IN Validation (Session 2 is strictly restricted to plant premises only)
-    if (sessionIndex === 2) {
-      const plants = await db.collection('plants').find({ active: { $ne: false } }).toArray().catch(() => []);
-      let isWithinAnyPlant = false;
-      let matchedPlantObj: any = null;
-      const R_EARTH = 6371e3; // meters
-      for (const p of plants) {
-        if (typeof p.lat === 'number' && typeof p.lng === 'number') {
-          const phi1 = (finalLat * Math.PI) / 180;
-          const phi2 = (p.lat * Math.PI) / 180;
-          const deltaPhi = ((p.lat - finalLat) * Math.PI) / 180;
-          const deltaLambda = ((p.lng - finalLng) * Math.PI) / 180;
-          const a = Math.sin(deltaPhi / 2) * Math.sin(deltaPhi / 2) +
-                    Math.cos(phi1) * Math.cos(phi2) * Math.sin(deltaLambda / 2) * Math.sin(deltaLambda / 2);
-          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-          const distance = R_EARTH * c;
-          if (distance <= (p.radius || 700)) {
-            isWithinAnyPlant = true;
-            matchedPlantObj = p;
-            break;
-          }
-        }
-      }
-
-      if (!isWithinAnyPlant) {
-        return NextResponse.json(
-          {
-            success: false,
-            message: "2nd session me Mark IN sirf plant ke andar se hi allow hai. Plant ke bahar se 2nd session Mark IN nahi ho sakta."
-          },
-          { status: 400 }
-        );
-      }
-    }
-
     const finalAddress = address || (inPlant ? String(inPlant) : "Registered Location");
     const finalPlant = inPlant || plantName || (selectedType === 'WFH' ? 'Outside-WFM' : selectedType === 'FIELD' ? 'Outside-Field Work' : 'N/A');
     const finalAttendanceType = attendanceType || (selectedType === 'WFH' ? 'Work From Home' : selectedType === 'FIELD' ? 'Field Work' : 'Plant Attendance');
@@ -322,8 +257,8 @@ export async function POST(req: Request) {
       mobileNumber: matchedEmp.mobileNumber || matchedEmp.mobile || undefined,
       firmId: matchedEmp.firmId || null,
       plantId: matchedEmp.plantId || null,
-      sessionIndex,
-      sessionNumber: sessionIndex,
+      sessionIndex: 1,
+      sessionNumber: 1,
       date: todayStr,
       inDate: todayStr,
       inTime: timeStr,
@@ -340,7 +275,7 @@ export async function POST(req: Request) {
       state: state || "Uttar Pradesh",
       pincode: pincode || "N/A",
       inPlant: finalPlant,
-      remark: body.remark || `Checked IN (Session ${sessionIndex}) for ${finalAttendanceType}`,
+      remark: body.remark || `Checked IN for ${finalAttendanceType}`,
       approved: false,
       unapprovedOutDuration: 0,
       currentGeofenceStatus: geofenceStatus,
@@ -400,7 +335,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         success: true,
-        message: `Attendance Marked IN Successfully! (Session ${sessionIndex} of 2)`,
+        message: `Attendance Marked IN Successfully!`,
         id: recordId,
         data: savedRecord,
       },

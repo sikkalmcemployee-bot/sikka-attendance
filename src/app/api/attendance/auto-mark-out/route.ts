@@ -51,20 +51,18 @@ async function processAutoMarkOut() {
       if (!inDT || !isValid(inDT)) continue;
 
       const elapsedHours = (nowDT.getTime() - inDT.getTime()) / (1000 * 60 * 60);
-      const sessionIdx = record.sessionIndex || 1;
 
-      // Threshold rules:
-      // Session 1: 16 hours max duration -> Auto Mark OUT with 8.00 hours fixed
-      // Session 2: 8 hours max duration -> Auto Mark OUT with 4.00 hours fixed
-      const thresholdHours = sessionIdx === 2 ? 8 : 16;
-      const creditedHours = sessionIdx === 2 ? 4.0 : 8.0;
+      // Auto Mark OUT Rule:
+      // Trigger: 16 hours after Mark IN
+      // Recorded Mark OUT time: 8 hours after Mark IN (for working-hour calculation)
+      const thresholdHours = 16;
+      const creditedHours = 8.0;
 
       if (elapsedHours >= thresholdHours) {
+        // Record the Mark OUT at inDT + 8h (not the actual trigger time)
         const creditOutDT = addHours(inDT, creditedHours);
         const finalOutDate = format(creditOutDT, "yyyy-MM-dd");
         const finalOutTime = format(creditOutDT, "HH:mm");
-        // Immediate Mark IN after 16-hour auto mark out (no 2-minute rest period)
-        const nextInEnableDT = sessionIdx === 1 ? now : null;
 
         const updatePayload: any = {
           outTime: finalOutTime,
@@ -76,9 +74,9 @@ async function processAutoMarkOut() {
           autoOut: true,
           autoCheckout: true,
           autoTriggerTime: now.toISOString(),
-          nextInEnableTime: nextInEnableDT ? nextInEnableDT.toISOString() : null,
+          nextInEnableTime: now.toISOString(), // Next Mark IN is allowed on the next calendar date
           currentGeofenceStatus: "Shift Closed",
-          remark: `System Auto-Logged OUT (${thresholdHours}h Limit reached for Session ${sessionIdx}); Credited ${creditedHours}h fixed working time.`,
+          remark: `System Auto-Logged OUT (16h limit reached). Recorded working time: ${creditedHours}h (8h after Mark IN).`,
           updatedAt: now.toISOString(),
         };
 
@@ -122,7 +120,6 @@ async function processAutoMarkOut() {
         updateCachedCollection('attendance', 'UPDATE', autoOutSavedRecord);
 
         // Broadcast real-time event AFTER confirmed MongoDB save
-        //    Each auto-out record gets its own push so clients refresh immediately
         realtimeBroadcaster.broadcast('attendance_updated', {
           collection: 'attendance',
           action: 'auto_out',
@@ -133,8 +130,9 @@ async function processAutoMarkOut() {
           id: String(record._id),
           employeeId: record.employeeId,
           employeeName: record.employeeName,
-          sessionIndex: sessionIdx,
           creditedHours,
+          recordedOutTime: `${finalOutDate} ${finalOutTime}`,
+          triggerTime: now.toISOString(),
         });
       }
     }
