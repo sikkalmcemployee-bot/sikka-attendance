@@ -512,7 +512,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
           </main>
 
           <footer className="py-4 border-t border-slate-100 flex items-center justify-center px-4 bg-white text-[10px] font-black uppercase tracking-widest text-slate-400 shrink-0 text-center">
-            © Sikka Industries & Logistics – Version 1.0
+            © Sikka Industries & Logistics – Version 1.5.0
           </footer>
         </div>
       </div>
