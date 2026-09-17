@@ -135,8 +135,8 @@ export async function POST(req: Request) {
         try { openInDT = parseISO(anyOpenShift.inDateTime); } catch {}
       }
 
-      // Auto Mark OUT: trigger at 16 hours after Mark IN, record 8 hours of working time
-      const thresholdHours = 16;
+      // Auto Mark OUT: trigger at 18 hours after Mark IN, record 8 hours of working time
+      const thresholdHours = 18;
       const creditedHours = 8.0;
 
       if (openInDT && isValid(openInDT)) {
@@ -151,12 +151,13 @@ export async function POST(req: Request) {
             hours: creditedHours,
             status: 'Auto OUT',
             outType: 'Auto',
+            markOutType: 'AUTO',
             autoOut: true,
             autoCheckout: true,
             autoTriggerTime: now.toISOString(),
-            nextInEnableTime: now.toISOString(),
+            nextInEnableTime: null,
             currentGeofenceStatus: "Shift Closed",
-            remark: `System Auto-Logged OUT (16h limit reached). Recorded working time: ${creditedHours}h.`,
+            remark: `System Auto-Logged OUT (18h limit reached). Recorded working time: ${creditedHours}h (8h after Mark IN).`,
             updatedAt: now.toISOString(),
           };
           await attendanceCol.updateOne({ _id: anyOpenShift._id }, { $set: autoOutPayload });
@@ -167,7 +168,20 @@ export async function POST(req: Request) {
             action: 'auto_out',
             data: autoOutRecord,
           });
-          // After auto-closing the stale open shift, fall through to create today's new Mark IN
+          // ONE MARK IN PER CALENDAR DATE: even after auto-close, block new Mark IN on same date
+          // The auto-closed shift's date may differ from today (e.g. overnight), so check today strictly
+          const autoClosedDate = anyOpenShift.date || anyOpenShift.inDate;
+          if (autoClosedDate === todayStr) {
+            return NextResponse.json(
+              {
+                success: false,
+                message: "You have already marked IN for today. A new Mark IN is only allowed on the next calendar date.",
+                data: autoOutRecord
+              },
+              { status: 400 }
+            );
+          }
+          // After auto-closing a shift from a PREVIOUS date, fall through to create today's new Mark IN
         } else {
           return NextResponse.json(
             {

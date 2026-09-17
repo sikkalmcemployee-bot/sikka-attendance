@@ -53,9 +53,10 @@ async function processAutoMarkOut() {
       const elapsedHours = (nowDT.getTime() - inDT.getTime()) / (1000 * 60 * 60);
 
       // Auto Mark OUT Rule:
-      // Trigger: 16 hours after Mark IN
+      // Trigger: 18 hours after Mark IN
       // Recorded Mark OUT time: 8 hours after Mark IN (for working-hour calculation)
-      const thresholdHours = 16;
+      // These are two separate values — trigger time vs. recorded time.
+      const thresholdHours = 18;
       const creditedHours = 8.0;
 
       if (elapsedHours >= thresholdHours) {
@@ -71,12 +72,13 @@ async function processAutoMarkOut() {
           hours: creditedHours,
           status: 'Auto OUT',
           outType: 'Auto',
+          markOutType: 'AUTO',
           autoOut: true,
           autoCheckout: true,
           autoTriggerTime: now.toISOString(),
-          nextInEnableTime: now.toISOString(), // Next Mark IN is allowed on the next calendar date
+          nextInEnableTime: null, // Next Mark IN is allowed on the next calendar date only
           currentGeofenceStatus: "Shift Closed",
-          remark: `System Auto-Logged OUT (16h limit reached). Recorded working time: ${creditedHours}h (8h after Mark IN).`,
+          remark: `System Auto-Logged OUT (18h limit reached). Recorded working time: ${creditedHours}h (8h after Mark IN).`,
           updatedAt: now.toISOString(),
         };
 

@@ -865,8 +865,8 @@ export default function AttendancePage() {
                   : (punchRec.inDateTime ? parseISO(punchRec.inDateTime) : null);
               if (inDT && isValid(inDT)) {
                 const diffHours = (now.getTime() - inDT.getTime()) / (1000 * 60 * 60);
-                // 16h trigger, 8h credited
-                if (diffHours >= 16) {
+                // 18h trigger, 8h credited
+                if (diffHours >= 18) {
                   hours = 8.0;
                 }
               }
@@ -1056,10 +1056,10 @@ export default function AttendancePage() {
       nextOutAt = inDT;
     }
 
-    // Stale: 16 hours have elapsed since Mark IN (auto-close trigger)
+    // Stale: 18 hours have elapsed since Mark IN (auto-close trigger)
     let stale = false;
     if (active && inDT && isValid(inDT)) {
-      const triggerTime = addHours(inDT, 16);
+      const triggerTime = addHours(inDT, 18);
       if (isAfter(now, triggerTime)) stale = true;
     }
 
@@ -1570,17 +1570,18 @@ export default function AttendancePage() {
           hours: creditedHours,
           status: 'Auto OUT',
           outType: 'Auto',
+          markOutType: 'AUTO',
           autoCheckout: true,
           autoOut: true,
           autoTriggerTime: getISTTime().toISOString(),
-          nextInEnableTime: getISTTime().toISOString(),
-          remark: `System Auto-Logged OUT (16h limit reached). Recorded working time: ${creditedHours}h (8h after Mark IN).`
+          nextInEnableTime: null,
+          remark: `System Auto-Logged OUT (18h limit reached). Recorded working time: ${creditedHours}h (8h after Mark IN).`
         });
       }
 
       toast({
         title: "Attendance Auto Closed",
-        description: `Shift auto-closed (16h limit). Working hours credited: ${creditedHours}h.`
+        description: `Shift auto-closed (18h limit). Working hours credited: ${creditedHours}h.`
       });
 
       await refreshData();
@@ -2255,7 +2256,7 @@ export default function AttendancePage() {
     <div className="space-y-6 pb-8 w-full mx-auto">
       {/* 0. GATEWAY PORTAL (MARK IN / MARK OUT) - STRICTLY FOR EMPLOYEE */}
       <div className="w-full space-y-6">
-        {(locationPermissionStatus === "denied" || locationPermissionStatus === "unavailable" || locationPermissionMessage) && (
+        {(locationPermissionStatus === "denied" || locationPermissionStatus === "unavailable") && !currentGPS && (
           <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-sm text-amber-900 animate-in fade-in">
             <div className="flex items-center gap-3">
               <MapPin className="w-5 h-5 text-amber-600 shrink-0" />
@@ -2425,11 +2426,6 @@ export default function AttendancePage() {
             <div className="pt-6 border-t border-slate-100 flex flex-col items-center justify-center w-full">
               {activeRecord ? (
                 <div className="w-full space-y-3">
-                  <div className="flex items-center justify-center gap-2 px-5 py-3 rounded-xl w-full border font-black text-sm uppercase tracking-wider text-emerald-600 bg-emerald-50 border-emerald-100">
-                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                    <span>Active Shift In Progress — Mark OUT when done</span>
-                  </div>
-
                   <div className="flex items-center justify-center gap-2 text-slate-600 bg-[#F8F9FA] px-5 py-2.5 rounded-xl w-full border border-slate-200 shadow-sm font-black uppercase tracking-wider text-xs">
                     <Clock className="w-4 h-4 text-slate-500" />
                     <span>
@@ -2440,7 +2436,7 @@ export default function AttendancePage() {
                             ? parseDateTime(activeRecord.date, activeRecord.inTime)
                             : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
                         const dateFormatted = startDT && isValid(startDT) ? format(startDT, "dd-MMM-yyyy") : (activeRecord.inDate || activeRecord.date || format(getISTTime(), "dd-MMM-yyyy"));
-                        return `${t.shiftStarted(dateFormatted, activeRecord.inTime || "--:--")} • ${t.maxAutoOut16h}`;
+                        return t.shiftStarted(dateFormatted, activeRecord.inTime || "--:--");
                       })()}
                     </span>
                   </div>
