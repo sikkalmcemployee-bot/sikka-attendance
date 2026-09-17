@@ -23,7 +23,6 @@ import {
   CalendarDays,
   User,
   Filter,
-  RefreshCw,
   Wifi,
   WifiOff,
 } from "lucide-react";
@@ -425,12 +424,6 @@ export default function AttendancePage() {
           lastResumeSync = Date.now();
           refreshData().catch(() => {});
         }
-      } else {
-        // App in background / sleeping (Rule 15C): clear GPS watcher to stop background hardware execution
-        if (watchIdRef.current !== null && typeof window !== 'undefined' && navigator.geolocation) {
-          navigator.geolocation.clearWatch(watchIdRef.current);
-          watchIdRef.current = null;
-        }
       }
     };
     const handleWindowFocus = () => {
@@ -484,118 +477,9 @@ export default function AttendancePage() {
 
   const isAutoTriggering = useRef(false);
   const activeRecordRef = useRef<any>(null);
-  const watchIdRef = useRef<number | null>(null);
-  const lastGeocodeRef = useRef<{ lat: number, lng: number, time: number } | null>(null);
   const plantsRef = useRef(plants);
   useEffect(() => { plantsRef.current = plants; }, [plants]);
   const { toast } = useToast();
-
-  const clearActiveWatch = useCallback(() => {
-    if (watchIdRef.current !== null && typeof window !== "undefined" && navigator.geolocation) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
-    }
-  }, []);
-
-  // Location check on mount (only for employee view)
-  const checkLocationOnMount = useCallback((isManualRetry = false) => {
-    if (typeof window === "undefined" || !navigator.geolocation) {
-      setLocationPermissionStatus("unavailable");
-      setLocationPermissionMessage(t.locationPermissionRequired);
-      return;
-    }
-
-    setLocationPermissionStatus("checking");
-
-    const handlePosSuccess = (pos: GeolocationPosition) => {
-      const { latitude: lat, longitude: lng, accuracy } = pos.coords;
-      setLocationPermissionStatus("granted");
-      setLocationPermissionMessage(null);
-      setCurrentGPS({ lat, lng });
-      setGpsAccuracy(accuracy);
-
-      const sortedAllPlants = (plants || [])
-        .map((p) => ({ plant: p, distance: Math.round(getPreciseDistance(lat, lng, p.lat, p.lng)) }))
-        .sort((a, b) => a.distance - b.distance);
-
-      if (sortedAllPlants.length > 0) {
-        setNearestPlantInfo(sortedAllPlants[0]);
-        if (sortedAllPlants[0].distance <= (sortedAllPlants[0].plant.radius || 700)) {
-          setDetectedPlant(sortedAllPlants[0].plant);
-          // Instant address assignment: plant name + location (0ms, no network wait)
-          setDetectedAddress((prev) => prev || (sortedAllPlants[0].plant.name + ((sortedAllPlants[0].plant as any).location ? ` (${(sortedAllPlants[0].plant as any).location})` : "")));
-        } else {
-          setDetectedPlant(null);
-        }
-      } else {
-        setNearestPlantInfo(null);
-        setDetectedPlant(null);
-      }
-
-      // Fast background reverse geocoding (throttled: only on first fetch or if moved > 100m and > 60s elapsed)
-      const lastGeo = lastGeocodeRef.current;
-      const shouldGeocode = !lastGeo || (
-        Date.now() - lastGeo.time > 60000 &&
-        getPreciseDistance(lat, lng, lastGeo.lat, lastGeo.lng) > 100
-      );
-
-      if (shouldGeocode) {
-        lastGeocodeRef.current = { lat, lng, time: Date.now() };
-        fetch('/api/geocode/reverse', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ lat, lng })
-        }).then(res => res.ok ? res.json() : null)
-          .then(data => {
-            if (data?.address) {
-              const addr = typeof data.address === 'object' ? (data.address.Match_addr || data.address.LongLabel || data.address.Address || "") : data.address;
-              if (addr) setDetectedAddress(addr);
-            }
-            if (data?.components) {
-              setDetailedLocation({
-                street: data.components.street || '',
-                area: data.components.area || '',
-                city: data.components.city || '',
-                state: data.components.state || '',
-                pincode: data.components.pincode || ''
-              });
-            }
-          }).catch(() => { });
-      }
-    };
-
-    navigator.geolocation.getCurrentPosition(
-      handlePosSuccess,
-      (err) => {
-        setLocationPermissionStatus("denied");
-        setLocationPermissionMessage(t.locationPermissionRequired);
-      },
-      { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
-    );
-
-    // Warm background listener to keep GPS hot while user is on page
-    if (watchIdRef.current === null) {
-      try {
-        watchIdRef.current = navigator.geolocation.watchPosition(
-          handlePosSuccess,
-          () => {},
-          { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
-        );
-      } catch (e) {}
-    }
-  }, [plants, t]);
-
-  useEffect(() => {
-    if (isEmployeeLogin) {
-      checkLocationOnMount();
-    }
-  }, [isEmployeeLogin, checkLocationOnMount]);
-
-  useEffect(() => {
-    return () => {
-      clearActiveWatch();
-    };
-  }, [clearActiveWatch]);
 
   useEffect(() => {
     setIsMounted(true);
@@ -1130,176 +1014,6 @@ export default function AttendancePage() {
     }
   }, [isEmployeeLogin, isStale, activeRecord]);
 
-  // Geofence boundary tracker (only for active employee shift in foreground)
-  useEffect(() => {
-    if (!isEmployeeLogin || !activeRecord || activeRecord.status !== "Open" || !navigator.geolocation) return;
-
-    const empRecord = (employees || []).find((e: any) => e.employeeId === effectiveEmployeeId);
-    const empDesignation = empRecord?.designation || verifiedUser?.designation || "Staff";
-
-    const trackGeofenceBoundary = async () => {
-      // Pause geofence tracking when app is sleeping, backgrounded, or minimized (Rule 15B/C)
-      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-      if (!navigator.geolocation) return;
-
-      navigator.geolocation.getCurrentPosition(
-        async (position) => {
-          const latestRecord = activeRecordRef.current;
-          if (!latestRecord || latestRecord.status !== "Open") return;
-
-          const { latitude: lat, longitude: lng } = position.coords;
-          const timeNowStr = format(getISTTime(), "yyyy-MM-dd HH:mm");
-
-          let currentEvents = latestRecord.exitEvents ? [...latestRecord.exitEvents] : [];
-          let currentActiveEvent = currentEvents.find((e: any) => !e.inPlantTime && e.trackingStatus === "Outside Plant");
-
-          const currentPlants = plantsRef.current || [];
-          const plantDistances = currentPlants.map(p => ({
-            plant: p,
-            distanceM: getPreciseDistance(lat, lng, p.lat, p.lng)
-          }));
-
-          const isInsideAnyPlant = plantDistances.some(pd => pd.distanceM <= (pd.plant.radius || 700));
-
-          if (!isInsideAnyPlant) {
-            let geocodedAddress = "Plant Perimeter Exit";
-            let nearest = plantDistances.sort((a, b) => a.distanceM - b.distanceM)[0];
-
-            let shouldUpdate = false;
-            const newLocationHistoryPoint = {
-              lat,
-              lng,
-              time: timeNowStr,
-              address: geocodedAddress,
-              distanceFromPlant: nearest ? Math.round(nearest.distanceM) : 0
-            };
-
-            if (!currentActiveEvent) {
-              const newExitEvent = {
-                id: `exit_${Date.now()}`,
-                outPlantTime: timeNowStr,
-                inPlantTime: null,
-                totalOutDuration: "00:00",
-                reason: "Automated Facility Perimeter Exit",
-                gpsLatitude: lat,
-                gpsLongitude: lng,
-                completeAddress: geocodedAddress,
-                distanceFromPlant: nearest ? Math.round(nearest.distanceM) : 0,
-                currentPlant: latestRecord.inPlant || "Salt Plant",
-                trackingStatus: "Outside Plant",
-                outLocationHistory: [newLocationHistoryPoint]
-              };
-              currentEvents.push(newExitEvent);
-              shouldUpdate = true;
-            } else {
-              const history = currentActiveEvent.outLocationHistory || [];
-              const lastPoint = history[history.length - 1];
-              currentActiveEvent.gpsLatitude = lat;
-              currentActiveEvent.gpsLongitude = lng;
-              if (geocodedAddress !== "Location Unavailable") currentActiveEvent.completeAddress = geocodedAddress;
-              if (nearest) currentActiveEvent.distanceFromPlant = Math.round(nearest.distanceM);
-              if (!lastPoint || lastPoint.address !== geocodedAddress || lastPoint.lat !== lat) {
-                history.push(newLocationHistoryPoint);
-                currentActiveEvent.outLocationHistory = history;
-                shouldUpdate = true;
-              }
-            }
-
-            // Immediately save to MongoDB plantExits collection via API
-            fetch('/api/exit-tracking', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                employeeCode: effectiveEmployeeId,
-                employeeName: effectiveEmployeeName,
-                designation: empDesignation,
-                plant: latestRecord.inPlant || "Salt Plant",
-                date: latestRecord.date,
-                attendanceId: latestRecord.id || latestRecord._id,
-                sessionIndex: latestRecord.sessionIndex || 1,
-                gpsLatitude: lat,
-                gpsLongitude: lng,
-                completeAddress: geocodedAddress,
-                distanceFromPlant: nearest ? Math.round(nearest.distanceM) : null,
-                action: 'OUT'
-              })
-            }).catch((err) => console.warn("Facility exit tracking POST failed", err));
-
-            if (shouldUpdate && latestRecord.currentGeofenceStatus !== "Outside Plant") {
-              await updateRecord('attendance', latestRecord.id || latestRecord._id, {
-                exitEvents: currentEvents,
-                currentGeofenceStatus: "Outside Plant"
-              }, true);
-            }
-          } else {
-            if (currentActiveEvent) {
-              const exitTimeParsed = parseISO(currentActiveEvent.outPlantTime.replace(" ", "T"));
-              const duration = differenceInMinutes(getISTTime(), exitTimeParsed);
-              const hh = String(Math.floor(Math.max(0, duration) / 60)).padStart(2, '0');
-              const mm = String(Math.max(0, duration) % 60).padStart(2, '0');
-
-              const qualifyingPlants = currentPlants
-                .map(p => ({ plant: p, distanceM: getPreciseDistance(lat, lng, p.lat, p.lng) }))
-                .filter(x => x.distanceM <= (x.plant.radius || 700))
-                .sort((a, b) => a.distanceM - b.distanceM);
-
-              const returnPlant = qualifyingPlants[0]?.plant;
-
-              currentActiveEvent.inPlantTime = timeNowStr;
-              currentActiveEvent.totalOutDuration = `${hh}:${mm}`;
-              currentActiveEvent.currentPlant = returnPlant?.name || latestRecord.inPlant || "Salt Plant";
-              currentActiveEvent.trackingStatus = "Returned";
-
-              // Immediately update MongoDB plantExits via API
-              fetch('/api/exit-tracking', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  employeeCode: effectiveEmployeeId,
-                  attendanceId: latestRecord.id || latestRecord._id,
-                  plant: returnPlant?.name || latestRecord.inPlant || "Salt Plant",
-                  gpsLatitude: lat,
-                  gpsLongitude: lng,
-                  action: 'RETURN'
-                })
-              }).catch((err) => console.warn("Facility return tracking POST failed", err));
-
-              await updateRecord('attendance', latestRecord.id || latestRecord._id, {
-                exitEvents: currentEvents,
-                currentGeofenceStatus: "Inside Plant"
-              }, true);
-
-              toast({
-                title: "Returned to Plant",
-                description: `Welcome back inside the geofence perimeter.`
-              });
-            }
-          }
-        },
-        async (error) => {
-          console.error("Geofence verification lookup failed", error);
-          const latestRecord = activeRecordRef.current;
-          if (!latestRecord || latestRecord.status !== "Open") return;
-
-          let currentEvents = latestRecord.exitEvents ? [...latestRecord.exitEvents] : [];
-          let currentActiveEvent = currentEvents.find((e: any) => !e.inPlantTime && e.trackingStatus === "Outside Plant");
-          if (currentActiveEvent && latestRecord.currentGeofenceStatus !== "Location Not Available") {
-            currentActiveEvent.completeAddress = "Location Not Available";
-            currentActiveEvent.trackingStatus = "Location Not Available";
-            await updateRecord('attendance', latestRecord.id || latestRecord._id, {
-              exitEvents: currentEvents,
-              currentGeofenceStatus: "Location Not Available"
-            }, true);
-          }
-        },
-        { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
-      );
-    };
-
-    const geofenceWorkerId = setInterval(trackGeofenceBoundary, 15 * 60 * 1000);
-    trackGeofenceBoundary();
-    return () => clearInterval(geofenceWorkerId);
-  }, [isEmployeeLogin, activeRecord?.id, activeRecord?.status, effectiveEmployeeId, effectiveEmployeeName]);
 
   const punchCheckIn = async (finalInPlant: string, attendanceType: string, plantName: string, geofenceStatus: string) => {
     if (isMutatingAttendance) return;
@@ -2286,24 +2000,6 @@ export default function AttendancePage() {
     <div className="space-y-6 pb-8 w-full mx-auto">
       {/* 0. GATEWAY PORTAL (MARK IN / MARK OUT) - STRICTLY FOR EMPLOYEE */}
       <div className="w-full space-y-6">
-        {(locationPermissionStatus === "denied" || locationPermissionStatus === "unavailable") && !currentGPS && (
-          <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 shadow-sm text-amber-900 animate-in fade-in">
-            <div className="flex items-center gap-3">
-              <MapPin className="w-5 h-5 text-amber-600 shrink-0" />
-              <span className="text-xs font-black uppercase tracking-wide">
-                {t.locationPermissionRequired}
-              </span>
-            </div>
-            <Button
-              size="sm"
-              className="bg-amber-600 hover:bg-amber-700 text-white font-black text-xs uppercase px-4 h-9 rounded-xl shrink-0"
-              onClick={() => checkLocationOnMount(true)}
-            >
-              {t.allowLocation}
-            </Button>
-          </div>
-        )}
-
         <Card className="shadow-2xl border-none overflow-hidden bg-white">
           <div className="h-1.5 bg-primary" />
           <CardHeader className="text-center py-5 sm:py-6 relative bg-slate-50/50 border-b border-slate-100 px-4">
@@ -2318,26 +2014,10 @@ export default function AttendancePage() {
           </CardHeader>
           <CardContent className="space-y-6 px-4 sm:px-8 pb-8 pt-6">
             {/* Employee Identification Card */}
-            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-2">
-              <div className="flex items-center justify-between border-b border-slate-200/80 pb-2">
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
+              <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">{t.employeeName}</span>
                 <span className="text-xs font-black text-slate-900 uppercase">{effectiveEmployeeName} ({effectiveEmployeeId})</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider">{t.currentLocation}</span>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs font-bold text-slate-700 text-right max-w-[240px] truncate" title={detectedAddress}>
-                    {detectedAddress || t.capturingAddress}
-                  </span>
-                  <button
-                    type="button"
-                    title="Refresh Location"
-                    onClick={() => checkLocationOnMount(true)}
-                    className="p-1 hover:bg-slate-200 rounded-lg text-slate-500 hover:text-slate-800 transition-colors"
-                  >
-                    <RefreshCw className={cn("w-3.5 h-3.5", locationPermissionStatus === "checking" && "animate-spin")} />
-                  </button>
-                </div>
               </div>
             </div>
 
@@ -2809,7 +2489,6 @@ export default function AttendancePage() {
         open={activeDialog === "IN"}
         onOpenChange={(o) => {
           if (!o) {
-            clearActiveWatch();
             setActiveDialog("NONE");
             setIsLoadingLocation(false);
           }
@@ -2898,7 +2577,7 @@ export default function AttendancePage() {
               type="button"
               variant="outline"
               className="flex-1 h-12 font-black rounded-xl text-slate-700 border-slate-300 uppercase tracking-wider text-xs"
-              onClick={() => { clearActiveWatch(); setActiveDialog("NONE"); setIsLoadingLocation(false); }}
+              onClick={() => { setActiveDialog("NONE"); setIsLoadingLocation(false); }}
             >
               {t.cancel}
             </Button>
@@ -2934,7 +2613,6 @@ export default function AttendancePage() {
         open={activeDialog === "OUT"}
         onOpenChange={(o) => {
           if (!o) {
-            clearActiveWatch();
             setActiveDialog("NONE");
             setIsLoadingLocation(false);
           }
@@ -3004,7 +2682,7 @@ export default function AttendancePage() {
               type="button"
               variant="outline"
               className="flex-1 h-12 font-black rounded-xl text-slate-700 border-slate-300 uppercase tracking-wider text-xs"
-              onClick={() => { clearActiveWatch(); setActiveDialog("NONE"); setIsLoadingLocation(false); }}
+              onClick={() => { setActiveDialog("NONE"); setIsLoadingLocation(false); }}
             >
               {t.cancel}
             </Button>
