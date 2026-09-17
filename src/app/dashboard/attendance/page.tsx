@@ -79,8 +79,16 @@ import {
 } from "@/components/ui/select";
 import { getTranslation } from "@/lib/translations";
 
+let moduleServerTimeOffset = 0;
+const setAttendanceServerTimeOffset = (offset: number) => {
+  moduleServerTimeOffset = offset;
+};
+
+// Authoritative IST time anchored to backend server time (Rule 15: device clock independent)
 const getISTTime = () => {
-  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  const currentServerMs = Date.now() + moduleServerTimeOffset;
+  const d = new Date(currentServerMs);
+  return new Date(d.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
 };
 
 const formatToReadableISTTime = (rawTime: any): string => {
@@ -357,7 +365,16 @@ export default function AttendancePage() {
     holidays = [],
     employees = [],
     leaveRequests = [],
+    serverTimeOffset = 0,
   } = useData();
+
+  // Keep page-level IST time synchronized with backend server time
+  useEffect(() => {
+    if (typeof serverTimeOffset === 'number') {
+      setAttendanceServerTimeOffset(serverTimeOffset);
+      setCurrentTime(getISTTime());
+    }
+  }, [serverTimeOffset]);
 
   // Determine if logged-in user is an Employee or Admin/Other User
   const isEmployeeLogin = useMemo(() => {
@@ -382,10 +399,11 @@ export default function AttendancePage() {
   // Monthly competition ranks fetched server-side (keyed by monthKey e.g. "2026-09")
   const [monthlyRanks, setMonthlyRanks] = useState<Record<string, number>>({});
 
-  // Internet Connectivity & Auto-Refresh / Status Synchronization (Requirements 1 & 12)
+  // Internet Connectivity & Auto-Refresh / Status Synchronization (Requirements 1 & 12, Rule 15)
   useEffect(() => {
     if (typeof window === 'undefined') return;
 
+    let lastResumeSync = 0;
     const handleOnline = () => {
       setIsOnline(true);
       refreshData().catch(() => {});
@@ -402,13 +420,28 @@ export default function AttendancePage() {
       if (document.visibilityState === 'visible') {
         setCurrentTime(getISTTime());
         setIsOnline(navigator.onLine);
-        refreshData().catch(() => {});
+        // Throttle resume sync: at least 20 seconds between auto-refreshes to prevent request storms
+        if (Date.now() - lastResumeSync > 20000) {
+          lastResumeSync = Date.now();
+          refreshData().catch(() => {});
+        }
+      } else {
+        // App in background / sleeping (Rule 15C): clear GPS watcher to stop background hardware execution
+        if (watchIdRef.current !== null && typeof window !== 'undefined' && navigator.geolocation) {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+          watchIdRef.current = null;
+        }
       }
     };
     const handleWindowFocus = () => {
-      setCurrentTime(getISTTime());
-      setIsOnline(navigator.onLine);
-      refreshData().catch(() => {});
+      if (document.visibilityState === 'visible') {
+        setCurrentTime(getISTTime());
+        setIsOnline(navigator.onLine);
+        if (Date.now() - lastResumeSync > 20000) {
+          lastResumeSync = Date.now();
+          refreshData().catch(() => {});
+        }
+      }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -452,6 +485,9 @@ export default function AttendancePage() {
   const isAutoTriggering = useRef(false);
   const activeRecordRef = useRef<any>(null);
   const watchIdRef = useRef<number | null>(null);
+  const lastGeocodeRef = useRef<{ lat: number, lng: number, time: number } | null>(null);
+  const plantsRef = useRef(plants);
+  useEffect(() => { plantsRef.current = plants; }, [plants]);
   const { toast } = useToast();
 
   const clearActiveWatch = useCallback(() => {
@@ -496,27 +532,36 @@ export default function AttendancePage() {
         setDetectedPlant(null);
       }
 
-      // Fast background reverse geocoding (non-blocking)
-      fetch('/api/geocode/reverse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lat, lng })
-      }).then(res => res.ok ? res.json() : null)
-        .then(data => {
-          if (data?.address) {
-            const addr = typeof data.address === 'object' ? (data.address.Match_addr || data.address.LongLabel || data.address.Address || "") : data.address;
-            if (addr) setDetectedAddress(addr);
-          }
-          if (data?.components) {
-            setDetailedLocation({
-              street: data.components.street || '',
-              area: data.components.area || '',
-              city: data.components.city || '',
-              state: data.components.state || '',
-              pincode: data.components.pincode || ''
-            });
-          }
-        }).catch(() => { });
+      // Fast background reverse geocoding (throttled: only on first fetch or if moved > 100m and > 60s elapsed)
+      const lastGeo = lastGeocodeRef.current;
+      const shouldGeocode = !lastGeo || (
+        Date.now() - lastGeo.time > 60000 &&
+        getPreciseDistance(lat, lng, lastGeo.lat, lastGeo.lng) > 100
+      );
+
+      if (shouldGeocode) {
+        lastGeocodeRef.current = { lat, lng, time: Date.now() };
+        fetch('/api/geocode/reverse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lat, lng })
+        }).then(res => res.ok ? res.json() : null)
+          .then(data => {
+            if (data?.address) {
+              const addr = typeof data.address === 'object' ? (data.address.Match_addr || data.address.LongLabel || data.address.Address || "") : data.address;
+              if (addr) setDetectedAddress(addr);
+            }
+            if (data?.components) {
+              setDetailedLocation({
+                street: data.components.street || '',
+                area: data.components.area || '',
+                city: data.components.city || '',
+                state: data.components.state || '',
+                pincode: data.components.pincode || ''
+              });
+            }
+          }).catch(() => { });
+      }
     };
 
     navigator.geolocation.getCurrentPosition(
@@ -1085,7 +1130,7 @@ export default function AttendancePage() {
     }
   }, [isEmployeeLogin, isStale, activeRecord]);
 
-  // Geofence boundary tracker (only for active employee shift)
+  // Geofence boundary tracker (only for active employee shift in foreground)
   useEffect(() => {
     if (!isEmployeeLogin || !activeRecord || activeRecord.status !== "Open" || !navigator.geolocation) return;
 
@@ -1093,6 +1138,10 @@ export default function AttendancePage() {
     const empDesignation = empRecord?.designation || verifiedUser?.designation || "Staff";
 
     const trackGeofenceBoundary = async () => {
+      // Pause geofence tracking when app is sleeping, backgrounded, or minimized (Rule 15B/C)
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+      if (!navigator.geolocation) return;
+
       navigator.geolocation.getCurrentPosition(
         async (position) => {
           const latestRecord = activeRecordRef.current;
@@ -1104,59 +1153,43 @@ export default function AttendancePage() {
           let currentEvents = latestRecord.exitEvents ? [...latestRecord.exitEvents] : [];
           let currentActiveEvent = currentEvents.find((e: any) => !e.inPlantTime && e.trackingStatus === "Outside Plant");
 
-          const plantDistances = (plants || []).map(p => ({
+          const currentPlants = plantsRef.current || [];
+          const plantDistances = currentPlants.map(p => ({
             plant: p,
             distanceM: getPreciseDistance(lat, lng, p.lat, p.lng)
           }));
 
-          const nearest = plantDistances.sort((a, b) => a.distanceM - b.distanceM)[0];
-          const allowedRadiusM = 700;
-          const isOutsideAllPlants = !nearest || nearest.distanceM > allowedRadiusM;
+          const isInsideAnyPlant = plantDistances.some(pd => pd.distanceM <= (pd.plant.radius || 700));
 
-          if (isOutsideAllPlants) {
-            let geocodedAddress = "Location Unavailable";
-            try {
-              const res = await fetch('/api/geocode/reverse', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ lat, lng })
-              });
-              if (res.ok) {
-                const data = await res.json();
-                geocodedAddress = data?.address?.Match_addr || data?.address || "Salt Plant Outside Zone";
-              }
-            } catch (e) {
-              console.error("Geofence reverse geocoding failed", e);
-            }
-
-            const newLocationHistoryPoint = {
-              time: timeNowStr,
-              address: geocodedAddress,
-              lat,
-              lng,
-              distance: nearest ? parseFloat(nearest.distanceM.toFixed(1)) : 0
-            };
+          if (!isInsideAnyPlant) {
+            let geocodedAddress = "Plant Perimeter Exit";
+            let nearest = plantDistances.sort((a, b) => a.distanceM - b.distanceM)[0];
 
             let shouldUpdate = false;
+            const newLocationHistoryPoint = {
+              lat,
+              lng,
+              time: timeNowStr,
+              address: geocodedAddress,
+              distanceFromPlant: nearest ? Math.round(nearest.distanceM) : 0
+            };
+
             if (!currentActiveEvent) {
-              currentActiveEvent = {
-                employeeCode: effectiveEmployeeId,
-                employeeName: effectiveEmployeeName,
-                designation: empDesignation,
-                plant: latestRecord.inPlant || "Salt Plant",
-                date: latestRecord.date,
+              const newExitEvent = {
+                id: `exit_${Date.now()}`,
                 outPlantTime: timeNowStr,
+                inPlantTime: null,
+                totalOutDuration: "00:00",
+                reason: "Automated Facility Perimeter Exit",
                 gpsLatitude: lat,
                 gpsLongitude: lng,
                 completeAddress: geocodedAddress,
-                distanceFromPlant: nearest ? Math.round(nearest.distanceM) : null,
-                outLocationHistory: [newLocationHistoryPoint],
-                inPlantTime: null,
-                totalOutDuration: null,
-                currentPlant: null,
-                trackingStatus: "Outside Plant"
+                distanceFromPlant: nearest ? Math.round(nearest.distanceM) : 0,
+                currentPlant: latestRecord.inPlant || "Salt Plant",
+                trackingStatus: "Outside Plant",
+                outLocationHistory: [newLocationHistoryPoint]
               };
-              currentEvents.push(currentActiveEvent);
+              currentEvents.push(newExitEvent);
               shouldUpdate = true;
             } else {
               const history = currentActiveEvent.outLocationHistory || [];
@@ -1192,12 +1225,11 @@ export default function AttendancePage() {
               })
             }).catch((err) => console.warn("Facility exit tracking POST failed", err));
 
-            if (shouldUpdate) {
+            if (shouldUpdate && latestRecord.currentGeofenceStatus !== "Outside Plant") {
               await updateRecord('attendance', latestRecord.id || latestRecord._id, {
                 exitEvents: currentEvents,
                 currentGeofenceStatus: "Outside Plant"
-              });
-              await refreshData();
+              }, true);
             }
           } else {
             if (currentActiveEvent) {
@@ -1206,7 +1238,7 @@ export default function AttendancePage() {
               const hh = String(Math.floor(Math.max(0, duration) / 60)).padStart(2, '0');
               const mm = String(Math.max(0, duration) % 60).padStart(2, '0');
 
-              const qualifyingPlants = (plants || [])
+              const qualifyingPlants = currentPlants
                 .map(p => ({ plant: p, distanceM: getPreciseDistance(lat, lng, p.lat, p.lng) }))
                 .filter(x => x.distanceM <= (x.plant.radius || 700))
                 .sort((a, b) => a.distanceM - b.distanceM);
@@ -1235,13 +1267,12 @@ export default function AttendancePage() {
               await updateRecord('attendance', latestRecord.id || latestRecord._id, {
                 exitEvents: currentEvents,
                 currentGeofenceStatus: "Inside Plant"
-              });
+              }, true);
 
               toast({
                 title: "Returned to Plant",
                 description: `Welcome back inside the geofence perimeter.`
               });
-              await refreshData();
             }
           }
         },
@@ -1252,14 +1283,13 @@ export default function AttendancePage() {
 
           let currentEvents = latestRecord.exitEvents ? [...latestRecord.exitEvents] : [];
           let currentActiveEvent = currentEvents.find((e: any) => !e.inPlantTime && e.trackingStatus === "Outside Plant");
-          if (currentActiveEvent) {
+          if (currentActiveEvent && latestRecord.currentGeofenceStatus !== "Location Not Available") {
             currentActiveEvent.completeAddress = "Location Not Available";
             currentActiveEvent.trackingStatus = "Location Not Available";
             await updateRecord('attendance', latestRecord.id || latestRecord._id, {
               exitEvents: currentEvents,
               currentGeofenceStatus: "Location Not Available"
-            });
-            await refreshData();
+            }, true);
           }
         },
         { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
@@ -1269,7 +1299,7 @@ export default function AttendancePage() {
     const geofenceWorkerId = setInterval(trackGeofenceBoundary, 15 * 60 * 1000);
     trackGeofenceBoundary();
     return () => clearInterval(geofenceWorkerId);
-  }, [isEmployeeLogin, activeRecord?.id, activeRecord?.status, plants, employees, effectiveEmployeeId, effectiveEmployeeName, verifiedUser]);
+  }, [isEmployeeLogin, activeRecord?.id, activeRecord?.status, effectiveEmployeeId, effectiveEmployeeName]);
 
   const punchCheckIn = async (finalInPlant: string, attendanceType: string, plantName: string, geofenceStatus: string) => {
     if (isMutatingAttendance) return;
@@ -1548,8 +1578,8 @@ export default function AttendancePage() {
     }
     if (!inDT || !isValid(inDT)) return;
 
-    // Auto Mark OUT: trigger at 16h, record working time as 8h after Mark IN
-    const thresholdHours = 16;
+    // Auto Mark OUT: trigger at 18h, record working time as 8h after Mark IN (Rule 3)
+    const thresholdHours = 18;
     const creditedHours = 8.0;
 
     setIsMutatingAttendance(true);
@@ -2311,6 +2341,7 @@ export default function AttendancePage() {
               </div>
             </div>
 
+
             {/* Live Clock Display */}
             <div className="py-6 px-8 sm:px-10 rounded-[2.5rem] bg-slate-50 text-slate-900 flex flex-col items-center justify-center space-y-1 shadow-inner border border-slate-100 max-w-[300px] mx-auto group hover:bg-primary/5 transition-colors" suppressHydrationWarning>
               {currentTime ? (
@@ -2323,7 +2354,7 @@ export default function AttendancePage() {
               )}
             </div>
 
-            {/* Internet Connectivity Status (Requirement 1) */}
+            {/* Internet Connectivity Status */}
             {!isOnline && (
               <div className="p-4 bg-rose-50 border border-rose-300 rounded-2xl text-rose-900 shadow-sm flex items-center gap-3 animate-in fade-in">
                 <WifiOff className="w-5 h-5 text-rose-600 shrink-0" />
@@ -2332,13 +2363,37 @@ export default function AttendancePage() {
                     Connection Required
                   </p>
                   <p className="text-xs font-bold text-rose-700 mt-0.5">
-                    You aren’t connected with internet. Please connect your device with internet
+                    You aren&apos;t connected with internet. Please connect your device with internet
                   </p>
                 </div>
               </div>
             )}
 
-            {/* Already Marked IN Today Alert */}
+            {/* RULE 1: Active Shift in Progress — Green Bold Banner */}
+            {activeRecord && (
+              <div className="p-4 bg-emerald-50 border border-emerald-300 rounded-2xl text-emerald-900 shadow-sm flex items-center gap-3 animate-in fade-in">
+                <span className="relative flex h-3 w-3 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-emerald-500" />
+                </span>
+                <p className="text-sm font-black text-emerald-800">
+                  Active shift in progress from{" "}
+                  {(() => {
+                    const startDT = (activeRecord.inDate && activeRecord.inTime)
+                      ? parseDateTime(activeRecord.inDate, activeRecord.inTime)
+                      : (activeRecord.date && activeRecord.inTime)
+                        ? parseDateTime(activeRecord.date, activeRecord.inTime)
+                        : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
+                    if (startDT && isValid(startDT)) {
+                      return format(startDT, "dd-MMM-yyyy hh:mm aa").replace(/am$/i, "AM").replace(/pm$/i, "PM");
+                    }
+                    return `${activeRecord.inDate || activeRecord.date || "Today"} ${activeRecord.inTime || "--:--"}`;
+                  })()}
+                </p>
+              </div>
+            )}
+
+            {/* RULE 12 COMPLETED state: Attendance completed for this attendance date */}
             {hasMarkedInToday && !activeRecord && (
               <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl text-amber-900 shadow-sm flex items-center gap-3 animate-in fade-in">
                 <CheckCircle className="w-5 h-5 text-amber-600 shrink-0" />
@@ -2347,11 +2402,12 @@ export default function AttendancePage() {
                     Attendance Completed for Today
                   </p>
                   <p className="text-xs font-bold text-amber-700 mt-0.5">
-                    You can mark IN again from tomorrow onwards.
+                    Attendance for today&apos;s date is complete. You can Mark IN from the next attendance date.
                   </p>
                 </div>
               </div>
             )}
+
 
             {activeRecord && !canMarkOut && nextOutAvailableAt && (
               <div className="p-4 bg-[#FFFDE7] rounded-2xl border border-amber-200 text-amber-800 animate-in fade-in max-w-md mx-auto w-full text-left shadow-sm" suppressHydrationWarning>
@@ -2425,20 +2481,46 @@ export default function AttendancePage() {
             {/* Attendance Status Footer */}
             <div className="pt-6 border-t border-slate-100 flex flex-col items-center justify-center w-full">
               {activeRecord ? (
-                <div className="w-full space-y-3">
-                  <div className="flex items-center justify-center gap-2 text-slate-600 bg-[#F8F9FA] px-5 py-2.5 rounded-xl w-full border border-slate-200 shadow-sm font-black uppercase tracking-wider text-xs">
-                    <Clock className="w-4 h-4 text-slate-500" />
-                    <span>
-                      {(() => {
-                        const startDT = (activeRecord.inDate && activeRecord.inTime)
-                          ? parseDateTime(activeRecord.inDate, activeRecord.inTime)
-                          : (activeRecord.date && activeRecord.inTime)
-                            ? parseDateTime(activeRecord.date, activeRecord.inTime)
-                            : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
-                        const dateFormatted = startDT && isValid(startDT) ? format(startDT, "dd-MMM-yyyy") : (activeRecord.inDate || activeRecord.date || format(getISTTime(), "dd-MMM-yyyy"));
-                        return t.shiftStarted(dateFormatted, activeRecord.inTime || "--:--");
-                      })()}
-                    </span>
+                <div className="w-full space-y-2">
+                  <div className="flex items-center justify-between gap-2 text-slate-600 bg-[#F8F9FA] px-4 py-2.5 rounded-xl w-full border border-slate-200 shadow-sm font-black uppercase tracking-wider text-xs">
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-slate-500" />
+                      <span>
+                        {(() => {
+                          const startDT = (activeRecord.inDate && activeRecord.inTime)
+                            ? parseDateTime(activeRecord.inDate, activeRecord.inTime)
+                            : (activeRecord.date && activeRecord.inTime)
+                              ? parseDateTime(activeRecord.date, activeRecord.inTime)
+                              : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
+                          const dateFormatted = startDT && isValid(startDT) ? format(startDT, "dd-MMM-yyyy") : (activeRecord.inDate || activeRecord.date || format(getISTTime(), "dd-MMM-yyyy"));
+                          return t.shiftStarted(dateFormatted, activeRecord.inTime || "--:--");
+                        })()}
+                      </span>
+                    </div>
+                    {/* Live Active Shift Duration anchored to Server India Time (Rule 15E) */}
+                    {(() => {
+                      const startDT = (activeRecord.inDate && activeRecord.inTime)
+                        ? parseDateTime(activeRecord.inDate, activeRecord.inTime)
+                        : (activeRecord.date && activeRecord.inTime)
+                          ? parseDateTime(activeRecord.date, activeRecord.inTime)
+                          : (activeRecord.inDateTime ? parseISO(activeRecord.inDateTime) : null);
+                      if (!startDT || !isValid(startDT)) return null;
+                      const now = currentTime || getISTTime();
+                      const diffMs = Math.max(0, now.getTime() - startDT.getTime());
+                      const totalSec = Math.floor(diffMs / 1000);
+                      const hh = String(Math.floor(totalSec / 3600)).padStart(2, '0');
+                      const mm = String(Math.floor((totalSec % 3600) / 60)).padStart(2, '0');
+                      const ss = String(totalSec % 60).padStart(2, '0');
+                      const isOver18h = diffMs >= 18 * 3600 * 1000;
+                      return (
+                        <div className={cn(
+                          "px-2 py-0.5 rounded text-[11px] font-mono font-bold tracking-normal",
+                          isOver18h ? "bg-amber-100 text-amber-800" : "bg-emerald-100 text-emerald-800"
+                        )}>
+                          {isOver18h ? "Auto OUT Pending" : `${hh}:${mm}:${ss}`}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               ) : hasMarkedInToday ? (

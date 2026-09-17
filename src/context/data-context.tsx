@@ -36,6 +36,9 @@ interface DataContextType {
   verifiedUser: any;
   isLoading: boolean;
   refreshData: () => Promise<void>;
+  serverTime: any;
+  serverTimeOffset: number;
+  getServerISTTime: () => Date;
 }
 
 const DataContext = createContext<DataContextType | undefined>(undefined);
@@ -134,6 +137,17 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const lastFetchTimeRef = React.useRef(0);
   const debounceTimerRef = React.useRef<any>(null);
 
+  const [serverTimeOffset, setServerTimeOffset] = useState<number>(0);
+  const serverTimeOffsetRef = React.useRef<number>(0);
+  const [serverTime, setServerTime] = useState<any>(null);
+
+  const getServerISTTime = useCallback(() => {
+    // Clock anchored to trusted backend server time, completely immune to device clock tampering
+    const currentServerMs = Date.now() + serverTimeOffsetRef.current;
+    const d = new Date(currentServerMs);
+    return new Date(d.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  }, []);
+
   const fetchData = useCallback(async (isManualRefresh = false) => {
     // If a fetch is already in progress and this is not a force-manual call, avoid duplicate parallel stampede
     if (isFetchingRef.current && !isManualRefresh) {
@@ -184,6 +198,12 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           }
           if (Array.isArray(bundle.users)) {
             setUsers(prev => (bundle.users.length > 0 || prev.length === 0 ? bundle.users : prev));
+          }
+          if (bundle.serverTime && typeof bundle.serverTime.timestamp === 'number') {
+            const offset = bundle.serverTime.timestamp - Date.now();
+            serverTimeOffsetRef.current = offset;
+            setServerTimeOffset(offset);
+            setServerTime(bundle.serverTime);
           }
           setIsLoading(false);
           lastFetchTimeRef.current = Date.now();
@@ -280,14 +300,20 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
           } catch (e) {}
         };
 
+        let reconnectDelay = 5000;
         eventSource.onerror = () => {
           if (eventSource) {
             eventSource.close();
             eventSource = null;
           }
-          // Fast reconnect in 1.5s
           clearTimeout(reconnectTimeout);
-          reconnectTimeout = setTimeout(connectSSE, 1500);
+          // Exponential backoff between 5s and 60s, avoiding tight reconnect storm
+          reconnectTimeout = setTimeout(() => {
+            if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+              connectSSE();
+            }
+            reconnectDelay = Math.min(reconnectDelay * 1.5, 60000);
+          }, reconnectDelay);
         };
       } catch (err) {
         console.warn('SSE connection attempt skipped:', err);
@@ -296,19 +322,21 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
     connectSSE();
 
-    // Periodic background fallback sync (every 60s - SSE provides instant live updates)
+    // Foreground-only fallback sync (every 60s while active; 0 requests when sleeping/backgrounded per Rule 15B/C)
     const backgroundRefreshTimer = setInterval(() => {
-      fetchData(false);
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        fetchData(false);
+      }
     }, 60000);
 
-    // Instant focus & visibility refresh (refreshes if >2s since last fetch)
+    // App Resume & Focus synchronization (cooldown of at least 20s to prevent spamming server)
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastFetchTimeRef.current > 2000) {
+      if (document.visibilityState === 'visible' && Date.now() - lastFetchTimeRef.current > 20000) {
         fetchData(false);
       }
     };
     const onFocus = () => {
-      if (Date.now() - lastFetchTimeRef.current > 2000) {
+      if (document.visibilityState === 'visible' && Date.now() - lastFetchTimeRef.current > 20000) {
         fetchData(false);
       }
     };
@@ -520,6 +548,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const clearAllNotifications = async () => {};
 
+  const refreshData = useCallback(async () => {
+    return fetchData(true);
+  }, [fetchData]);
+
   const value = useMemo(() => ({
     employees,
     attendanceRecords,
@@ -540,8 +572,34 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     currentUser,
     verifiedUser,
     isLoading,
-    refreshData: () => fetchData(true)
-  }), [employees, attendanceRecords, vouchers, payrollRecords, plants, firms, users, holidays, notifications, leaveRequests, currentUser, verifiedUser, isLoading, fetchData, upsertAttendanceRecord]);
+    refreshData,
+    serverTime,
+    serverTimeOffset,
+    getServerISTTime,
+  }), [
+    employees,
+    attendanceRecords,
+    vouchers,
+    payrollRecords,
+    plants,
+    firms,
+    users,
+    holidays,
+    notifications,
+    leaveRequests,
+    currentUser,
+    verifiedUser,
+    isLoading,
+    refreshData,
+    serverTime,
+    serverTimeOffset,
+    getServerISTTime,
+    addRecord,
+    updateRecord,
+    deleteRecord,
+    setRecord,
+    upsertAttendanceRecord,
+  ]);
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>;
 }

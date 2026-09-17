@@ -2,12 +2,27 @@ import { NextResponse } from 'next/server';
 import { getDb } from '@/lib/mongodb';
 import { getCachedBootstrapData, setCachedBootstrapData, getInFlightPromise, setInFlightPromise } from '@/lib/data-cache';
 import { cookies } from 'next/headers';
+import { format } from 'date-fns';
+import { processAutoMarkOut } from '@/lib/auto-mark-out';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const fetchCache = 'force-no-store';
 
 const ADMIN_ROLES = ['SUPER_ADMIN', 'ADMIN', 'HR'];
+
+const getServerTimePayload = () => {
+  const now = new Date();
+  const istDate = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+  return {
+    timestamp: now.getTime(),
+    iso: now.toISOString(),
+    ist: format(istDate, 'yyyy-MM-dd HH:mm:ss'),
+    date: format(istDate, 'yyyy-MM-dd'),
+    time: format(istDate, 'HH:mm'),
+    timezone: 'Asia/Kolkata',
+  };
+};
 
 /**
  * High-Performance Single-Roundtrip Data Bootstrap API
@@ -17,6 +32,7 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const forceRefresh = searchParams.get('refresh') === 'true';
+    const serverTime = getServerTimePayload();
 
     // Resolve session user for notification & query filtering
     let sessionUser: any = null;
@@ -50,7 +66,10 @@ export async function GET(req: Request) {
     if (!forceRefresh) {
       const cached = getCachedBootstrapData(cacheKey);
       if (cached) {
-        return NextResponse.json(cached, {
+        return NextResponse.json({
+          ...cached,
+          serverTime,
+        }, {
           headers: {
             'Cache-Control': 'no-cache, must-revalidate',
             'X-Cache-Status': 'HIT',
@@ -63,7 +82,10 @@ export async function GET(req: Request) {
       if (inFlight && isAdmin) {
         const payload = await inFlight;
         if (payload) {
-          return NextResponse.json(payload, {
+          return NextResponse.json({
+            ...payload,
+            serverTime,
+          }, {
             headers: {
               'Cache-Control': 'no-cache, must-revalidate',
               'X-Cache-Status': 'COALESCED',
@@ -79,6 +101,13 @@ export async function GET(req: Request) {
     });
     if (!db) {
       return NextResponse.json({ error: 'Database unavailable' }, { status: 503 });
+    }
+
+    // Process pending 18-hour auto mark-out on connection/reopen before building queries
+    if (sessionEmpId) {
+      await processAutoMarkOut(sessionEmpId).catch(() => {});
+    } else if (isAdmin) {
+      await processAutoMarkOut().catch(() => {});
     }
 
     // Build employee-specific queries if authenticated as standard employee
@@ -242,7 +271,10 @@ export async function GET(req: Request) {
     // Store in in-memory cache for fast sub-millisecond future requests
     setCachedBootstrapData(payload, cacheKey);
 
-    return NextResponse.json(payload, {
+    return NextResponse.json({
+      ...payload,
+      serverTime,
+    }, {
       headers: {
         'Cache-Control': 'no-cache, must-revalidate',
         'X-Cache-Status': 'MISS',

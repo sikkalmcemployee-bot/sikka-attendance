@@ -379,14 +379,17 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
     }
   }, [verifiedUser]);
 
-  // Continuous background GPS telemetry heartbeat for active employee devices
+  // Low-frequency foreground telemetry heartbeat (Rule 15: 0 background requests when sleeping/closed)
+  const activeEmpId = verifiedUser?.employeeId || verifiedUser?.username || verifiedUser?.id || '';
   useEffect(() => {
-    if (!verifiedUser || typeof window === 'undefined' || !navigator.geolocation) return;
+    if (!activeEmpId || typeof window === 'undefined' || !navigator.geolocation) return;
 
-    const empId = verifiedUser.employeeId || verifiedUser.username || verifiedUser.id || '';
-    if (!empId) return;
-
+    let lastPingTime = 0;
     const sendGpsPing = () => {
+      // Never send ping when sleeping/backgrounded per Rule 15B/C, or if pinged < 2 minutes ago
+      if (document.visibilityState !== 'visible' || Date.now() - lastPingTime < 120000) return;
+      lastPingTime = Date.now();
+
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           const { latitude: gpsLatitude, longitude: gpsLongitude } = pos.coords;
@@ -396,7 +399,7 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              employeeId: empId,
+              employeeId: activeEmpId,
               deviceId,
               gpsLatitude,
               gpsLongitude,
@@ -404,38 +407,20 @@ function AuthorizedContent({ children }: { children: React.ReactNode }) {
           }).catch(() => { });
         },
         () => { },
-        { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
+        { enableHighAccuracy: false, timeout: 10000, maximumAge: 60000 }
       );
     };
 
-    sendGpsPing();
-    const interval = setInterval(sendGpsPing, 30000); // Heartbeat ping every 30s
-
-    const watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        const { latitude: gpsLatitude, longitude: gpsLongitude } = pos.coords;
-        const deviceId = localStorage.getItem('sikka_device_id') || '';
-
-        fetch('/api/device-registry/heartbeat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            employeeId: empId,
-            deviceId,
-            gpsLatitude,
-            gpsLongitude,
-          }),
-        }).catch(() => { });
-      },
-      () => { },
-      { enableHighAccuracy: true, timeout: 5000, maximumAge: 30000 }
-    );
+    // Initial delayed ping after 5 seconds to avoid startup race
+    const startupTimer = setTimeout(sendGpsPing, 5000);
+    // Low-frequency heartbeat interval: once every 5 minutes (300,000 ms) while active in foreground
+    const interval = setInterval(sendGpsPing, 300000);
 
     return () => {
+      clearTimeout(startupTimer);
       clearInterval(interval);
-      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     };
-  }, [verifiedUser]);
+  }, [activeEmpId]);
 
   // Quick authorization check without blocking users
   useEffect(() => {
